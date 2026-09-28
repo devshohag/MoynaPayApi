@@ -1,4 +1,5 @@
 using MoynaPay.Application.Abstractions;
+using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Orders;
 using MoynaPay.Application.Security;
 using MoynaPay.Domain.Merchants;
@@ -250,6 +251,130 @@ await CheckAsync("the first event records how the order arrived", async () =>
     var e = h.Db.Events.Single();
 
     return e.Type == "order.received" && e.Actor == Actor.Shop && e.To == OrderStatus.Calling;
+});
+
+// ---------------------------------------------------------------------------
+// Merchant onboarding and API keys
+// ---------------------------------------------------------------------------
+MerchantService MerchantHarness(MemoryDatabase db, ISecretProtector? protector = null) =>
+    new(new MemoryMerchantStore(db), protector ?? new PrefixProtector(), new FixedClock(now));
+
+await CheckAsync("a merchant can be created with a subscription", async () =>
+{
+    var db = new MemoryDatabase();
+    var service = MerchantHarness(db);
+
+    var r = await service.CreateAsync(new CreateMerchantCommand
+    {
+        Name = "New Shop",
+        Msisdn = "01711223344",
+        Calls = true,
+        Payments = true,
+        Plan = "trial",
+    });
+
+    return r.Outcome == CreateMerchantOutcome.Created
+        && r.Merchant!.Msisdn == "8801711223344"
+        && db.Subscriptions[r.Merchant.Id].Calls
+        && db.Subscriptions[r.Merchant.Id].Payments;
+});
+
+await CheckAsync("issuing a key shows the secret once and stores only the cipher", async () =>
+{
+    var db = new MemoryDatabase();
+    var service = MerchantHarness(db);
+    var created = await service.CreateAsync(new CreateMerchantCommand
+    {
+        Name = "Key Shop",
+        Msisdn = "01711223344",
+        Payments = true,
+    });
+
+    var issued = await service.IssueKeyAsync(created.Merchant!.Id, "WooCommerce", bootstrapOnly: true);
+    var key = issued.Credential!;
+
+    return issued.Outcome == IssueApiKeyOutcome.Issued
+        && issued.Secret is { Length: > 20 }
+        && key.KeyId.StartsWith("mp_", StringComparison.Ordinal)
+        && key.SecretCipher != issued.Secret
+        && key.KeyRingId == PrefixProtector.KeyRing
+        && key.Label == "WooCommerce";
+});
+
+await CheckAsync("the issued secret signs requests for that merchant", async () =>
+{
+    var db = new MemoryDatabase();
+    var protector = new PrefixProtector();
+    var service = MerchantHarness(db, protector);
+    var created = await service.CreateAsync(new CreateMerchantCommand
+    {
+        Name = "Signed Shop",
+        Msisdn = "01711223344",
+        Calls = true,
+    });
+    var issued = await service.IssueKeyAsync(created.Merchant!.Id, "site", bootstrapOnly: true);
+    var stored = await new MemoryMerchantStore(db).FindCredentialAsync(issued.Credential!.KeyId);
+    var opened = protector.Unprotect(stored!.SecretCipher, stored.KeyRingId);
+    var signature = RequestSignature.Sign(opened, "POST", "/v1/orders", 1790269500, "n1", "{}");
+
+    return opened == issued.Secret
+        && stored.TenantId == created.Merchant.Id
+        && RequestSignature.Verify(issued.Secret!, "POST", "/v1/orders", 1790269500, "n1", "{}",
+            signature, 1790269500);
+});
+
+await CheckAsync("key lists never expose secrets", async () =>
+{
+    var db = new MemoryDatabase();
+    var service = MerchantHarness(db);
+    var created = await service.CreateAsync(new CreateMerchantCommand
+    {
+        Name = "List Shop",
+        Msisdn = "01711223344",
+    });
+    var issued = await service.IssueKeyAsync(created.Merchant!.Id, "first", bootstrapOnly: true);
+    var listed = await service.ListKeysAsync(created.Merchant.Id);
+
+    return listed.Count == 1
+        && listed[0].KeyId == issued.Credential!.KeyId
+        && listed[0].SecretCipher.StartsWith("sealed:", StringComparison.Ordinal);
+});
+
+await CheckAsync("revoking one key makes only that key unusable", async () =>
+{
+    var db = new MemoryDatabase();
+    var store = new MemoryMerchantStore(db);
+    var service = MerchantHarness(db);
+    var created = await service.CreateAsync(new CreateMerchantCommand
+    {
+        Name = "Revoke Shop",
+        Msisdn = "01711223344",
+    });
+    var first = await service.IssueKeyAsync(created.Merchant!.Id, "first", bootstrapOnly: true);
+    var second = await service.IssueKeyAsync(created.Merchant.Id, "second");
+
+    var revoked = await service.RevokeKeyAsync(created.Merchant.Id, first.Credential!.KeyId);
+
+    return revoked
+        && await store.FindCredentialAsync(first.Credential.KeyId) is null
+        && await store.FindCredentialAsync(second.Credential!.KeyId) is not null;
+});
+
+await CheckAsync("bootstrap key issue is only for the first key", async () =>
+{
+    var db = new MemoryDatabase();
+    var service = MerchantHarness(db);
+    var created = await service.CreateAsync(new CreateMerchantCommand
+    {
+        Name = "Bootstrap Shop",
+        Msisdn = "01711223344",
+    });
+
+    var first = await service.IssueKeyAsync(created.Merchant!.Id, "first", bootstrapOnly: true);
+    var again = await service.IssueKeyAsync(created.Merchant.Id, "again", bootstrapOnly: true);
+
+    return first.Outcome == IssueApiKeyOutcome.Issued
+        && again.Outcome == IssueApiKeyOutcome.Refused;
 });
 
 // ---------------------------------------------------------------------------
@@ -510,4 +635,20 @@ return fail == 0 ? 0 : 1;
 sealed class FixedClock(DateTimeOffset at) : IClock
 {
     public DateTimeOffset UtcNow { get; } = at;
+}
+
+sealed class PrefixProtector : ISecretProtector
+{
+    public const string KeyRing = "test-prefix";
+
+    public string Protect(string plaintext, out string keyRingId)
+    {
+        keyRingId = KeyRing;
+        return "sealed:" + plaintext;
+    }
+
+    public string Unprotect(string cipher, string keyRingId) =>
+        keyRingId == KeyRing && cipher.StartsWith("sealed:", StringComparison.Ordinal)
+            ? cipher["sealed:".Length..]
+            : throw new InvalidOperationException("bad cipher");
 }

@@ -36,6 +36,25 @@ public sealed class MemoryMerchantStore(MemoryDatabase db) : IMerchantStore
     public Task<Merchant?> FindAsync(Guid merchantId, CancellationToken ct = default) =>
         Task.FromResult(db.Merchants.TryGetValue(merchantId, out var m) && !m.IsDeleted ? m : null);
 
+    public Task SaveMerchantAsync(Merchant merchant, Subscription subscription, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(merchant);
+        ArgumentNullException.ThrowIfNull(subscription);
+
+        lock (db.Gate)
+        {
+            if (db.Merchants.ContainsKey(merchant.Id))
+            {
+                throw new InvalidOperationException("duplicate merchant");
+            }
+
+            db.Merchants[merchant.Id] = merchant;
+            db.Subscriptions[merchant.Id] = subscription;
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task<Subscription> SubscriptionAsync(Guid merchantId, CancellationToken ct = default) =>
         Task.FromResult(db.Subscriptions.TryGetValue(merchantId, out var s)
             ? s
@@ -45,6 +64,49 @@ public sealed class MemoryMerchantStore(MemoryDatabase db) : IMerchantStore
 
     public Task<ApiCredential?> FindCredentialAsync(string keyId, CancellationToken ct = default) =>
         Task.FromResult(db.Credentials.TryGetValue(keyId, out var c) && c.IsActive ? c : null);
+
+    public Task<IReadOnlyList<ApiCredential>> ListCredentialsAsync(Guid merchantId, CancellationToken ct = default)
+    {
+        IReadOnlyList<ApiCredential> rows = db.Credentials.Values
+            .Where(c => c.TenantId == merchantId && !c.IsDeleted)
+            .OrderByDescending(c => c.CreatedAt)
+            .ToList();
+
+        return Task.FromResult(rows);
+    }
+
+    public Task<bool> HasAnyCredentialAsync(Guid merchantId, CancellationToken ct = default) =>
+        Task.FromResult(db.Credentials.Values.Any(c => c.TenantId == merchantId && !c.IsDeleted));
+
+    public Task SaveCredentialAsync(ApiCredential credential, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(credential);
+
+        if (!db.Credentials.TryAdd(credential.KeyId, credential))
+        {
+            throw new InvalidOperationException("duplicate key");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> RevokeCredentialAsync(Guid merchantId, string keyId, DateTimeOffset at,
+        CancellationToken ct = default)
+    {
+        if (!db.Credentials.TryGetValue(keyId, out var credential)
+            || credential.TenantId != merchantId
+            || credential.IsDeleted
+            || credential.RevokedAt is not null)
+        {
+            return Task.FromResult(false);
+        }
+
+        credential.RevokedAt = at;
+        credential.UpdatedAt = at;
+        db.Credentials[keyId] = credential;
+
+        return Task.FromResult(true);
+    }
 
     public Task<WebhookEndpoint?> WebhookAsync(Guid merchantId, CancellationToken ct = default) =>
         Task.FromResult(db.Webhooks.TryGetValue(merchantId, out var w) && !w.IsDeleted ? w : null);

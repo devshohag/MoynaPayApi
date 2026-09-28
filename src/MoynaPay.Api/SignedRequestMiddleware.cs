@@ -25,7 +25,9 @@ public sealed class SignedRequestMiddleware(RequestDelegate next, ILogger<Signed
 
         var path = context.Request.Path.Value ?? "";
 
-        if (!path.StartsWith("/v1/", StringComparison.Ordinal) || path == "/v1/health")
+        if (!path.StartsWith("/v1/", StringComparison.Ordinal)
+            || path == "/v1/health"
+            || path.StartsWith("/v1/merchants", StringComparison.Ordinal))
         {
             await next(context).ConfigureAwait(false);
             return;

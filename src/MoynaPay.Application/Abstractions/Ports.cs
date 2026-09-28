@@ -49,10 +49,21 @@ public interface IMerchantStore
 {
     Task<Merchant?> FindAsync(Guid merchantId, CancellationToken ct = default);
 
+    Task SaveMerchantAsync(Merchant merchant, Subscription subscription, CancellationToken ct = default);
+
     Task<Subscription> SubscriptionAsync(Guid merchantId, CancellationToken ct = default);
 
     /// <summary>Resolves a signing key to the merchant it belongs to. Null when revoked.</summary>
     Task<ApiCredential?> FindCredentialAsync(string keyId, CancellationToken ct = default);
+
+    Task<IReadOnlyList<ApiCredential>> ListCredentialsAsync(Guid merchantId, CancellationToken ct = default);
+
+    Task<bool> HasAnyCredentialAsync(Guid merchantId, CancellationToken ct = default);
+
+    Task SaveCredentialAsync(ApiCredential credential, CancellationToken ct = default);
+
+    Task<bool> RevokeCredentialAsync(Guid merchantId, string keyId, DateTimeOffset at,
+        CancellationToken ct = default);
 
     Task<WebhookEndpoint?> WebhookAsync(Guid merchantId, CancellationToken ct = default);
 }

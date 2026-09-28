@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using MoynaPay.Api;
+using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Orders;
 using MoynaPay.Domain.Merchants;
@@ -28,6 +29,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 // The host does not know or care which it got.
 builder.Services.AddMoynaPay(builder.Configuration);
 
+builder.Services.AddScoped<MerchantService>();
 builder.Services.AddScoped<CreateOrderService>();
 builder.Services.AddScoped<OrderTransitionService>();
 
@@ -41,12 +43,102 @@ if (DependencyInjection.IsInMemory(app.Configuration))
         "In-memory stores. Orders do not survive a restart, and secrets are not encrypted. " +
         "Development only.");
 
-    Seed(app.Services.GetRequiredService<MemoryDatabase>());
+    if (app.Environment.IsDevelopment())
+    {
+        Seed(app.Services.GetRequiredService<MemoryDatabase>());
+    }
 }
 
 app.UseMiddleware<SignedRequestMiddleware>();
 
 app.MapGet("/v1/health", () => Results.Ok(new { status = "ok", service = "MoynaPay" }));
+
+// ---------------------------------------------------------------------------
+// Merchant onboarding and API keys.
+// ---------------------------------------------------------------------------
+app.MapPost("/v1/merchants", async (
+    CreateMerchantRequest request, MerchantService service, CancellationToken ct) =>
+{
+    var result = await service.CreateAsync(new CreateMerchantCommand
+    {
+        Name = request.Name,
+        Msisdn = request.Msisdn,
+        TimeZone = request.TimeZone,
+        Address = request.Address,
+        SupportMsisdn = request.SupportMsisdn,
+        Calls = request.Calls,
+        Payments = request.Payments,
+        Courier = request.Courier,
+        Plan = request.Plan,
+    }, ct).ConfigureAwait(false);
+
+    if (result.Outcome == CreateMerchantOutcome.Invalid)
+    {
+        return Results.Problem(title: result.Reason, statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    return Results.Created($"/v1/merchants/{result.Merchant!.Id}", MerchantView(result.Merchant));
+});
+
+app.MapPost("/v1/merchants/{merchantId:guid}/api-keys", async (
+    Guid merchantId, IssueApiKeyRequest request, MerchantService service, CancellationToken ct) =>
+{
+    var result = await service.IssueKeyAsync(merchantId, request.Label, bootstrapOnly: true, ct)
+        .ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        IssueApiKeyOutcome.Issued => Results.Created(
+            $"/v1/api-keys/{result.Credential!.KeyId}", ApiKeyIssuedView(result.Credential, result.Secret!)),
+        IssueApiKeyOutcome.NoMerchant => Results.NotFound(),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapGet("/v1/api-keys", async (
+    HttpContext context, MerchantService service, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var keys = await service.ListKeysAsync(merchantId, ct).ConfigureAwait(false);
+
+    return Results.Ok(keys.Select(ApiKeyView));
+});
+
+app.MapPost("/v1/api-keys", async (
+    IssueApiKeyRequest request, HttpContext context, MerchantService service, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var result = await service.IssueKeyAsync(merchantId, request.Label, ct: ct).ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        IssueApiKeyOutcome.Issued => Results.Created(
+            $"/v1/api-keys/{result.Credential!.KeyId}", ApiKeyIssuedView(result.Credential, result.Secret!)),
+        IssueApiKeyOutcome.NoMerchant => Results.NotFound(),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapDelete("/v1/api-keys/{keyId}", async (
+    string keyId, HttpContext context, MerchantService service, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    return await service.RevokeKeyAsync(merchantId, keyId, ct).ConfigureAwait(false)
+        ? Results.NoContent()
+        : Results.NotFound();
+});
 
 // ---------------------------------------------------------------------------
 // Orders, from the shop.
@@ -156,6 +248,36 @@ static object View(Order order) => new
     confirmedAt = order.ConfirmedAt,
 };
 
+static object MerchantView(Merchant merchant) => new
+{
+    id = merchant.Id,
+    name = merchant.Name,
+    msisdn = merchant.Msisdn,
+    status = merchant.Status,
+    timeZone = merchant.TimeZone,
+    address = merchant.Address,
+    supportMsisdn = merchant.SupportMsisdn,
+    createdAt = merchant.CreatedAt,
+};
+
+static object ApiKeyView(ApiCredential credential) => new
+{
+    keyId = credential.KeyId,
+    label = credential.Label,
+    createdAt = credential.CreatedAt,
+    lastUsedAt = credential.LastUsedAt,
+    revokedAt = credential.RevokedAt,
+    active = credential.IsActive,
+};
+
+static object ApiKeyIssuedView(ApiCredential credential, string secret) => new
+{
+    keyId = credential.KeyId,
+    secret,
+    label = credential.Label,
+    createdAt = credential.CreatedAt,
+};
+
 /// <summary>
 /// One merchant and one key, so the service can be driven the moment it starts.
 ///
@@ -205,3 +327,16 @@ public sealed record CreateOrderRequest(
     string? CallbackUrl);
 
 public sealed record CancelRequest(string? Reason);
+
+public sealed record CreateMerchantRequest(
+    string? Name,
+    string? Msisdn,
+    string? TimeZone,
+    string? Address,
+    string? SupportMsisdn,
+    bool Calls,
+    bool Payments,
+    bool Courier,
+    string? Plan);
+
+public sealed record IssueApiKeyRequest(string? Label);

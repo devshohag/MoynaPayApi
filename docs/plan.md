@@ -19,12 +19,13 @@ Done: dispatcher with per-order ordering, retry ladder 10s/1m/5m/30m/2h/6h/24h (
 webhook URL checked as string and at connect time (private ranges blocked), 148 checks.
 Pending on the developer machine: migration OutboxDelivery.
 
-## Phase 4: Merchant, subscription, API key issue and revoke
-- Replace the hardcoded seed merchant with real creation: merchant + subscription (calls/payments/courier flags).
-- Issue API credentials: KeyId public, secret shown once, stored only as SecretCipher (through ISecretProtector).
-- Revoke a key (immediate 401 for that key, others keep working); list keys without secrets.
-- Keep `mp_dev_demo` only in Development.
-- Done when: create → issue → signed call works; revoked key gets 401; checks cover all four; migration added.
+## Phase 4: Merchant, subscription, API key issue and revoke [DONE]
+Done: merchant onboarding creates merchant + subscription (calls/payments/courier flags), API credentials
+are issued with public KeyId and one-time plaintext secret, stored through ISecretProtector as SecretCipher,
+keys list without secrets, revoke makes that key fail lookup immediately while other keys keep working,
+and `mp_dev_demo` is seeded only in Development. Checks cover create → issue → signed call works,
+revoked key lookup fails, other key still works, and bootstrap issue is first-key only.
+Pending with the EF/Postgres store: migration for the same rows.
 
 ## Phase 5: Key ring — AES-GCM secret protector
 - Port YoPay's key ring: versioned keys, AES-GCM, key id in the cipher text, rotate without re-encrypting everything.
