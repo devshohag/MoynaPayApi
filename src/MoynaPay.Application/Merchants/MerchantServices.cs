@@ -78,7 +78,7 @@ public sealed class MerchantService(
         }
 
         var now = clock.UtcNow;
-        var secret = NewSecret();
+        var secret = MerchantSecrets.NewSecret();
         var cipher = secrets.Protect(secret, out var keyRingId);
         var credential = new ApiCredential
         {
@@ -113,13 +113,6 @@ public sealed class MerchantService(
         Span<byte> bytes = stackalloc byte[12];
         RandomNumberGenerator.Fill(bytes);
         return "mp_" + Convert.ToHexString(bytes).ToLowerInvariant();
-    }
-
-    private static string NewSecret()
-    {
-        Span<byte> bytes = stackalloc byte[32];
-        RandomNumberGenerator.Fill(bytes);
-        return Convert.ToBase64String(bytes);
     }
 
     private static string? BlankToNull(string? value) =>

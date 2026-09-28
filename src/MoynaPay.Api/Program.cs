@@ -31,6 +31,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddMoynaPay(builder.Configuration);
 
 builder.Services.AddScoped<MerchantService>();
+builder.Services.AddScoped<WebhookService>();
 builder.Services.AddScoped<CreateOrderService>();
 builder.Services.AddScoped<OrderTransitionService>();
 
@@ -145,6 +146,75 @@ app.MapDelete("/v1/api-keys/{keyId}", async (
 
     return await service.RevokeKeyAsync(merchantId, keyId, ct).ConfigureAwait(false)
         ? Results.NoContent()
+        : Results.NotFound();
+});
+
+app.MapGet("/v1/webhook/endpoint", async (
+    HttpContext context, IMerchantStore merchants, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var endpoint = await merchants.WebhookAsync(merchantId, ct).ConfigureAwait(false);
+
+    return endpoint is null ? Results.NotFound() : Results.Ok(WebhookView(endpoint));
+});
+
+app.MapPut("/v1/webhook/endpoint", async (
+    RegisterWebhookRequest request, HttpContext context, WebhookService service,
+    CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var result = await service.RegisterAsync(merchantId, request.Url, request.Active ?? true, ct)
+        .ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        WebhookOutcome.Created => Results.Created("/v1/webhook/endpoint", WebhookView(result.Endpoint!)),
+        WebhookOutcome.Updated => Results.Ok(WebhookView(result.Endpoint!)),
+        WebhookOutcome.Invalid => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
+        WebhookOutcome.NoMerchant => Results.NotFound(),
+        _ => Results.Problem(statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapPost("/v1/webhook/endpoint/test", async (
+    HttpContext context, WebhookService service, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var result = await service.SendTestAsync(merchantId, ct).ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        WebhookTestOutcome.Delivered => Results.Ok(WebhookTestView(result)),
+        WebhookTestOutcome.Failed => Results.Problem(
+            title: result.FailureReason, statusCode: StatusCodes.Status502BadGateway),
+        _ => Results.NotFound(),
+    };
+});
+
+app.MapPost("/v1/webhook/endpoint/rotate-secret", async (
+    HttpContext context, WebhookService service, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var result = await service.RotateSecretAsync(merchantId, ct).ConfigureAwait(false);
+
+    return result.Outcome == WebhookOutcome.Updated
+        ? Results.Ok(WebhookView(result.Endpoint!))
         : Results.NotFound();
 });
 
@@ -286,6 +356,23 @@ static object ApiKeyIssuedView(ApiCredential credential, string secret) => new
     createdAt = credential.CreatedAt,
 };
 
+static object WebhookView(WebhookEndpoint endpoint) => new
+{
+    url = endpoint.Url,
+    active = endpoint.Active,
+    lastDeliveredAt = endpoint.LastDeliveredAt,
+    lastFailureReason = endpoint.LastFailureReason,
+    createdAt = endpoint.CreatedAt,
+    updatedAt = endpoint.UpdatedAt,
+};
+
+static object WebhookTestView(WebhookTestResult result) => new
+{
+    delivered = result.Outcome == WebhookTestOutcome.Delivered,
+    signature = result.Signature,
+    body = result.Body,
+};
+
 /// <summary>
 /// One merchant and one key, so the service can be driven the moment it starts.
 ///
@@ -348,3 +435,5 @@ public sealed record CreateMerchantRequest(
     string? Plan);
 
 public sealed record IssueApiKeyRequest(string? Label);
+
+public sealed record RegisterWebhookRequest(string? Url, bool? Active);

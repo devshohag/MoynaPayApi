@@ -110,6 +110,31 @@ public sealed class MemoryMerchantStore(MemoryDatabase db) : IMerchantStore
 
     public Task<WebhookEndpoint?> WebhookAsync(Guid merchantId, CancellationToken ct = default) =>
         Task.FromResult(db.Webhooks.TryGetValue(merchantId, out var w) && !w.IsDeleted ? w : null);
+
+    public Task SaveWebhookAsync(WebhookEndpoint endpoint, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+
+        db.Webhooks[endpoint.TenantId] = endpoint;
+
+        return Task.CompletedTask;
+    }
+
+    public Task UpdateWebhookDeliveryAsync(Guid merchantId, DateTimeOffset? deliveredAt,
+        string? failureReason, CancellationToken ct = default)
+    {
+        if (!db.Webhooks.TryGetValue(merchantId, out var endpoint) || endpoint.IsDeleted)
+        {
+            return Task.CompletedTask;
+        }
+
+        endpoint.LastDeliveredAt = deliveredAt ?? endpoint.LastDeliveredAt;
+        endpoint.LastFailureReason = failureReason;
+        endpoint.UpdatedAt = deliveredAt ?? DateTimeOffset.UtcNow;
+        db.Webhooks[merchantId] = endpoint;
+
+        return Task.CompletedTask;
+    }
 }
 
 public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore

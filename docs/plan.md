@@ -34,10 +34,12 @@ development secrets are migrated on first start. Checks cover round-trip, tamper
 old-key decrypt after rotation, and plaintext-to-AES migration.
 Pending with the EF/Postgres store: database-backed migration for persisted plaintext rows.
 
-## Phase 6: Webhook endpoint — register, test, rotate
-- API to register/update the shop webhook URL (validated with WebhookUrl rules), send a signed test event, rotate the signing secret.
-- Write WebhookEndpoint.LastDeliveredAt and LastFailureReason from the dispatcher.
-- Done when: register → test event delivered → rotate → old secret rejected after grace period; checks added.
+## Phase 6: Webhook endpoint — register, test, rotate [DONE]
+Done: signed API can register/update the shop webhook URL, reject local/private literal
+URLs, send a signed `webhook.test` event through IWebhookSender, rotate the signing secret,
+and update WebhookEndpoint.LastDeliveredAt / LastFailureReason from delivery results. Checks
+cover register → signed test delivered, failure metadata, private URL rejection, and rotation
+making old signatures fail.
 
 ## Phase 7: YoAIWorkflow integration — OrderConfirmation workflow
 - Bring in YoAIWorkflow (Shohag's own SDK) and model order confirmation as a workflow: new order → call/pay steps → outcome.

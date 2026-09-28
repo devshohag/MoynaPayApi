@@ -400,6 +400,100 @@ await CheckAsync("bootstrap key issue is only for the first key", async () =>
         && again.Outcome == IssueApiKeyOutcome.Refused;
 });
 
+await CheckAsync("webhook register sends a signed test and records delivery", async () =>
+{
+    var db = new MemoryDatabase();
+    var protector = new PrefixProtector();
+    var sender = new RecordingWebhookSender(true);
+    var merchantService = MerchantHarness(db, protector);
+    var created = await merchantService.CreateAsync(new CreateMerchantCommand
+    {
+        Name = "Hook Shop",
+        Msisdn = "01711223344",
+    });
+    var webhooks = new WebhookService(new MemoryMerchantStore(db), protector, sender, new FixedClock(now));
+    var registered = await webhooks.RegisterAsync(created.Merchant!.Id, "https://shop.example.com/hook");
+    var test = await webhooks.SendTestAsync(created.Merchant.Id);
+    var endpoint = db.Webhooks[created.Merchant.Id];
+
+    var opened = protector.Unprotect(endpoint.SecretCipher, endpoint.KeyRingId);
+
+    return registered.Outcome == WebhookOutcome.Created
+        && test.Outcome == WebhookTestOutcome.Delivered
+        && endpoint.LastDeliveredAt == now
+        && endpoint.LastFailureReason is null
+        && sender.LastUrl == "https://shop.example.com/hook"
+        && RequestSignature.VerifyWebhook(opened, sender.LastSignature!, sender.LastBody!, now.ToUnixTimeSeconds());
+});
+
+await CheckAsync("webhook rejects local and private URLs", async () =>
+{
+    var db = new MemoryDatabase();
+    var service = MerchantHarness(db);
+    var created = await service.CreateAsync(new CreateMerchantCommand
+    {
+        Name = "Blocked Hook Shop",
+        Msisdn = "01711223344",
+    });
+    var webhooks = new WebhookService(
+        new MemoryMerchantStore(db), new PrefixProtector(), new RecordingWebhookSender(true), new FixedClock(now));
+
+    var local = await webhooks.RegisterAsync(created.Merchant!.Id, "http://localhost/hook");
+    var privateIp = await webhooks.RegisterAsync(created.Merchant.Id, "https://192.168.1.20/hook");
+
+    return local.Outcome == WebhookOutcome.Invalid
+        && privateIp.Outcome == WebhookOutcome.Invalid
+        && db.Webhooks.IsEmpty;
+});
+
+await CheckAsync("webhook rotation makes old signatures fail after grace", async () =>
+{
+    var db = new MemoryDatabase();
+    var protector = new PrefixProtector();
+    var service = MerchantHarness(db, protector);
+    var created = await service.CreateAsync(new CreateMerchantCommand
+    {
+        Name = "Rotate Hook Shop",
+        Msisdn = "01711223344",
+    });
+    var webhooks = new WebhookService(
+        new MemoryMerchantStore(db), protector, new RecordingWebhookSender(true), new FixedClock(now));
+
+    await webhooks.RegisterAsync(created.Merchant!.Id, "https://shop.example.com/hook");
+    var oldEndpoint = db.Webhooks[created.Merchant.Id];
+    var oldSecret = protector.Unprotect(oldEndpoint.SecretCipher, oldEndpoint.KeyRingId);
+    var oldHeader = RequestSignature.SignWebhook(oldSecret, now.ToUnixTimeSeconds(), "{}");
+
+    var rotated = await webhooks.RotateSecretAsync(created.Merchant.Id);
+    var newEndpoint = db.Webhooks[created.Merchant.Id];
+    var newSecret = protector.Unprotect(newEndpoint.SecretCipher, newEndpoint.KeyRingId);
+
+    return rotated.Outcome == WebhookOutcome.Updated
+        && newSecret != oldSecret
+        && !RequestSignature.VerifyWebhook(newSecret, oldHeader, "{}", now.ToUnixTimeSeconds());
+});
+
+await CheckAsync("webhook test failure records the reason", async () =>
+{
+    var db = new MemoryDatabase();
+    var protector = new PrefixProtector();
+    var service = MerchantHarness(db, protector);
+    var created = await service.CreateAsync(new CreateMerchantCommand
+    {
+        Name = "Fail Hook Shop",
+        Msisdn = "01711223344",
+    });
+    var webhooks = new WebhookService(
+        new MemoryMerchantStore(db), protector, new RecordingWebhookSender(false), new FixedClock(now));
+
+    await webhooks.RegisterAsync(created.Merchant!.Id, "https://shop.example.com/hook");
+    var test = await webhooks.SendTestAsync(created.Merchant.Id);
+
+    return test.Outcome == WebhookTestOutcome.Failed
+        && db.Webhooks[created.Merchant.Id].LastDeliveredAt is null
+        && db.Webhooks[created.Merchant.Id].LastFailureReason == "boom";
+});
+
 Check("AES-GCM secret protector round-trips with the active key id in the cipher", () =>
 {
     var protector = AesProtector("k1");
@@ -750,4 +844,23 @@ sealed class PrefixProtector : ISecretProtector
         keyRingId == KeyRing && cipher.StartsWith("sealed:", StringComparison.Ordinal)
             ? cipher["sealed:".Length..]
             : throw new InvalidOperationException("bad cipher");
+}
+
+sealed class RecordingWebhookSender(bool succeeds) : IWebhookSender
+{
+    public string? LastUrl { get; private set; }
+    public string? LastBody { get; private set; }
+    public string? LastSignature { get; private set; }
+
+    public Task<WebhookSendResult> SendAsync(WebhookEndpoint endpoint, string body, string signature,
+        CancellationToken ct = default)
+    {
+        LastUrl = endpoint.Url;
+        LastBody = body;
+        LastSignature = signature;
+
+        return Task.FromResult(succeeds
+            ? new WebhookSendResult(true, 200, null)
+            : new WebhookSendResult(false, null, "boom"));
+    }
 }

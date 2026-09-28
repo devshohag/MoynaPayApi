@@ -66,6 +66,19 @@ public interface IMerchantStore
         CancellationToken ct = default);
 
     Task<WebhookEndpoint?> WebhookAsync(Guid merchantId, CancellationToken ct = default);
+
+    Task SaveWebhookAsync(WebhookEndpoint endpoint, CancellationToken ct = default);
+
+    Task UpdateWebhookDeliveryAsync(Guid merchantId, DateTimeOffset? deliveredAt,
+        string? failureReason, CancellationToken ct = default);
+}
+
+public sealed record WebhookSendResult(bool Succeeded, int? StatusCode, string? FailureReason);
+
+public interface IWebhookSender
+{
+    Task<WebhookSendResult> SendAsync(WebhookEndpoint endpoint, string body, string signature,
+        CancellationToken ct = default);
 }
 
 public interface IOrderStore

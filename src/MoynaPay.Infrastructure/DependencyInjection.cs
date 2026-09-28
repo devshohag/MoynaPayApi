@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Infrastructure.Memory;
 using MoynaPay.Infrastructure.Security;
+using MoynaPay.Infrastructure.Webhooks;
 
 namespace MoynaPay.Infrastructure;
 
@@ -37,6 +38,7 @@ public static class DependencyInjection
         ArgumentNullException.ThrowIfNull(configuration);
 
         services.AddSingleton<IClock, SystemClock>();
+        services.AddHttpClient<IWebhookSender, HttpWebhookSender>();
 
         if (IsInMemory(configuration))
         {
