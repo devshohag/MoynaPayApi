@@ -1,5 +1,6 @@
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
+using MoynaPay.Domain.Payments;
 
 namespace MoynaPay.Application.Abstractions;
 
@@ -107,6 +108,42 @@ public interface IWorkflowSessionStore
     Task ReleaseAsync(WorkflowSession session, string runnerId, CancellationToken ct = default);
 }
 
+public enum WorkflowActionStatus
+{
+    Started,
+    Completed,
+}
+
+public sealed class WorkflowAction
+{
+    public required Guid MerchantId { get; init; }
+    public required Guid OrderId { get; init; }
+    public required string ActionId { get; init; }
+    public WorkflowActionStatus Status { get; set; } = WorkflowActionStatus.Started;
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public string? Result { get; set; }
+}
+
+public enum WorkflowActionStart
+{
+    Started,
+    AlreadyCompleted,
+    AlreadyRunning,
+}
+
+public interface IWorkflowActionStore
+{
+    Task<WorkflowActionStart> TryStartAsync(Guid merchantId, Guid orderId, string actionId,
+        DateTimeOffset now, CancellationToken ct = default);
+
+    Task CompleteAsync(Guid merchantId, Guid orderId, string actionId, string? result,
+        DateTimeOffset now, CancellationToken ct = default);
+
+    Task<WorkflowAction?> FindAsync(Guid merchantId, Guid orderId, string actionId,
+        CancellationToken ct = default);
+}
+
 public interface IOrderStore
 {
     Task<Order?> FindByReferenceAsync(Guid merchantId, string reference, CancellationToken ct = default);
@@ -130,6 +167,13 @@ public interface IOrderStore
 
     Task<IReadOnlyList<OrderEvent>> TimelineAsync(Guid merchantId, Guid orderId,
         CancellationToken ct = default);
+}
+
+public interface IInvoiceStore
+{
+    Task<Invoice?> FindByOrderRefAsync(Guid merchantId, string orderRef, CancellationToken ct = default);
+
+    Task SaveAsync(Invoice invoice, CancellationToken ct = default);
 }
 
 public sealed record OrderQuery

@@ -37,6 +37,7 @@ builder.Services.AddScoped<CreateOrderService>();
 builder.Services.AddScoped<OrderTransitionService>();
 builder.Services.AddScoped<OrderWorkflowService>();
 builder.Services.AddScoped<OrderWorkflowRunner>();
+builder.Services.AddScoped<WorkflowActionHandlers>();
 
 var app = builder.Build();
 

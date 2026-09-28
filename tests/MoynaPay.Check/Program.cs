@@ -197,6 +197,21 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
     return (h.Db, new OrderWorkflowService(h.Create, h.Move, orders, merchants, sessions, clock), sessions);
 }
 
+(MemoryDatabase Db, WorkflowActionHandlers Actions, OrderWorkflowService Workflow) ActionHarness(
+    bool calls = false, bool pay = true, bool courier = true, bool webhook = true)
+{
+    var h = Harness(calls: calls, pay: pay, courier: courier, webhook: webhook);
+    var orders = new MemoryOrderStore(h.Db);
+    var invoices = new MemoryInvoiceStore(h.Db);
+    var actionStore = new MemoryWorkflowActionStore(h.Db);
+    var workflowSessions = new MemoryWorkflowSessionStore(h.Db);
+    var merchants = new MemoryMerchantStore(h.Db);
+    var clock = new FixedClock(now);
+    var workflow = new OrderWorkflowService(h.Create, h.Move, orders, merchants, workflowSessions, clock);
+
+    return (h.Db, new WorkflowActionHandlers(actionStore, orders, invoices, h.Move, clock), workflow);
+}
+
 CreateOrderCommand Cmd(string reference = "ORD-1", string msisdn = "01711223344", decimal amount = 1250m)
     => new()
     {
@@ -400,6 +415,58 @@ await CheckAsync("workflow runner resumes an interrupted confirmation exactly on
         && saved!.Complete
         && saved.LeaseOwner is null
         && h.Db.Events.Count(e => e.To == OrderStatus.AwaitingPayment) == 1;
+});
+
+await CheckAsync("notify shop action queues outbox only once", async () =>
+{
+    var h = ActionHarness();
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var first = await h.Actions.NotifyShopAsync(merchantId, r.Order!.Id);
+    var again = await h.Actions.NotifyShopAsync(merchantId, r.Order.Id);
+
+    return first.Start == WorkflowActionStart.Started
+        && again.Start == WorkflowActionStart.AlreadyCompleted
+        && h.Db.Outbox.Count == 1
+        && h.Db.Outbox[0].EventType == "order.notification";
+});
+
+await CheckAsync("create invoice action creates invoice only once", async () =>
+{
+    var h = ActionHarness();
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var first = await h.Actions.CreateInvoiceAsync(merchantId, r.Order!.Id);
+    var again = await h.Actions.CreateInvoiceAsync(merchantId, r.Order.Id);
+
+    return first.Start == WorkflowActionStart.Started
+        && again.Start == WorkflowActionStart.AlreadyCompleted
+        && h.Db.Invoices.Count == 1
+        && h.Db.Orders[r.Order.Id].ChargedAmount == r.Order.Amount
+        && h.Db.Events.Count(e => e.Type == "action.create_invoice") == 1;
+});
+
+await CheckAsync("book courier action books courier only once", async () =>
+{
+    var h = ActionHarness(calls: false, pay: true, courier: true);
+    var r = await h.Workflow.CreateAsync(Cmd());
+    await h.Workflow.DecideAsync(new WorkflowDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        To = OrderStatus.Paid,
+        By = Actor.Machine,
+        EventType = "order.paid",
+    });
+
+    var first = await h.Actions.BookCourierAsync(merchantId, r.Order.Id);
+    var again = await h.Actions.BookCourierAsync(merchantId, r.Order.Id);
+
+    return first.Start == WorkflowActionStart.Started
+        && again.Start == WorkflowActionStart.AlreadyCompleted
+        && h.Db.Orders[r.Order.Id].Status == OrderStatus.Booked
+        && h.Db.Orders[r.Order.Id].TrackingCode == $"PENDING-{r.Order.Reference}"
+        && h.Db.Events.Count(e => e.Type == "order.booked") == 1;
 });
 
 // ---------------------------------------------------------------------------

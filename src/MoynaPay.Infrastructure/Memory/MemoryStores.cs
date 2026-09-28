@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
+using MoynaPay.Domain.Payments;
 
 namespace MoynaPay.Infrastructure.Memory;
 
@@ -25,9 +26,11 @@ public sealed class MemoryDatabase
     public ConcurrentDictionary<Guid, WebhookEndpoint> Webhooks { get; } = new();
 
     public ConcurrentDictionary<Guid, Order> Orders { get; } = new();
+    public ConcurrentDictionary<Guid, Invoice> Invoices { get; } = new();
     public List<OrderEvent> Events { get; } = [];
     public List<OutboxMessage> Outbox { get; } = [];
     public ConcurrentDictionary<string, WorkflowSession> WorkflowSessions { get; } = new(StringComparer.Ordinal);
+    public ConcurrentDictionary<string, WorkflowAction> WorkflowActions { get; } = new(StringComparer.Ordinal);
 
     internal readonly object Gate = new();
 }
@@ -241,6 +244,28 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
     }
 }
 
+public sealed class MemoryInvoiceStore(MemoryDatabase db) : IInvoiceStore
+{
+    public Task<Invoice?> FindByOrderRefAsync(Guid merchantId, string orderRef, CancellationToken ct = default)
+    {
+        var invoice = db.Invoices.Values.FirstOrDefault(i =>
+            i.TenantId == merchantId
+            && !i.IsDeleted
+            && string.Equals(i.OrderRef, orderRef, StringComparison.Ordinal));
+
+        return Task.FromResult(invoice);
+    }
+
+    public Task SaveAsync(Invoice invoice, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(invoice);
+
+        db.Invoices[invoice.Id] = invoice;
+
+        return Task.CompletedTask;
+    }
+}
+
 public sealed class MemoryWorkflowSessionStore(MemoryDatabase db) : IWorkflowSessionStore
 {
     public Task<WorkflowSession?> FindAsync(Guid merchantId, Guid orderId, string name,
@@ -306,6 +331,63 @@ public sealed class MemoryWorkflowSessionStore(MemoryDatabase db) : IWorkflowSes
 
     private static string Key(Guid merchantId, Guid orderId, string name) =>
         $"{merchantId:N}:{orderId:N}:{name}";
+}
+
+public sealed class MemoryWorkflowActionStore(MemoryDatabase db) : IWorkflowActionStore
+{
+    public Task<WorkflowActionStart> TryStartAsync(Guid merchantId, Guid orderId, string actionId,
+        DateTimeOffset now, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(actionId);
+
+        lock (db.Gate)
+        {
+            var key = Key(merchantId, orderId, actionId);
+            if (db.WorkflowActions.TryGetValue(key, out var existing))
+            {
+                return Task.FromResult(existing.Status == WorkflowActionStatus.Completed
+                    ? WorkflowActionStart.AlreadyCompleted
+                    : WorkflowActionStart.AlreadyRunning);
+            }
+
+            db.WorkflowActions[key] = new WorkflowAction
+            {
+                MerchantId = merchantId,
+                OrderId = orderId,
+                ActionId = actionId,
+                StartedAt = now,
+            };
+
+            return Task.FromResult(WorkflowActionStart.Started);
+        }
+    }
+
+    public Task CompleteAsync(Guid merchantId, Guid orderId, string actionId, string? result,
+        DateTimeOffset now, CancellationToken ct = default)
+    {
+        lock (db.Gate)
+        {
+            var key = Key(merchantId, orderId, actionId);
+            if (!db.WorkflowActions.TryGetValue(key, out var action)) return Task.CompletedTask;
+
+            action.Status = WorkflowActionStatus.Completed;
+            action.CompletedAt = now;
+            action.Result = result;
+            db.WorkflowActions[key] = action;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<WorkflowAction?> FindAsync(Guid merchantId, Guid orderId, string actionId,
+        CancellationToken ct = default)
+    {
+        db.WorkflowActions.TryGetValue(Key(merchantId, orderId, actionId), out var action);
+        return Task.FromResult(action);
+    }
+
+    private static string Key(Guid merchantId, Guid orderId, string actionId) =>
+        $"{merchantId:N}:{orderId:N}:{actionId}";
 }
 
 /// <summary>

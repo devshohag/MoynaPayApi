@@ -56,10 +56,11 @@ OrderConfirmation sessions exactly once. Checks cover lease contention, lease ex
 restart-style resume from a half-confirmed order into the next subscribed step.
 Pending with the EF/Postgres store/package: database-backed session persistence and migration.
 
-## Phase 9: Action handlers — notify shop, invoice, courier (idempotent)
-- Handlers for "notify shop" (outbox), "create invoice", "book courier", each with a stable action id.
-- Running a handler twice must have the effect of once.
-- Done when: duplicate execution checks pass for all three.
+## Phase 9: Action handlers — notify shop, invoice, courier (idempotent) [DONE]
+Done: workflow actions now have a stable action id and action store, with handlers for
+notify shop (outbox row), create invoice, and book courier. A completed action is skipped
+on repeat, so running a handler twice has the effect of once. Checks cover duplicate
+execution for all three handlers.
 
 ## Phase 10: AI proposal gate
 - AI may only PROPOSE (confirm / needs human / reschedule) with a confidence; business rules decide.
