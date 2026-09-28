@@ -1,0 +1,10 @@
+.vs/
+bin/
+obj/
+
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+[Ll]aunch[Ss]ettings.json
