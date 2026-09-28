@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Phase 2 adds Npgsql.EntityFrameworkCore.PostgreSQL here. Until then this project
+       carries the development fallback, so every host builds and runs with no feed. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\MoynaPay.Application\MoynaPay.Application.csproj" />
+  </ItemGroup>
+</Project>

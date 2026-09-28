@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- No package references either. Everything that decides something - the lifecycle,
+       the signatures, order intake - stays runnable without a database or a feed. -->
+  <ItemGroup>
+    <ProjectReference Include="..\MoynaPay.Domain\MoynaPay.Domain.csproj" />
+  </ItemGroup>
+</Project>

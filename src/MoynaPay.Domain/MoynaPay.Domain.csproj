@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- No package references. The domain is the part that has to be testable on any
+       machine, with no feed, no database and no network. -->
+</Project>

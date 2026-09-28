@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MoynaPay.Api/MoynaPay.Api.csproj" />
+    <Project Path="src/MoynaPay.Application/MoynaPay.Application.csproj" />
+    <Project Path="src/MoynaPay.Domain/MoynaPay.Domain.csproj" />
+    <Project Path="src/MoynaPay.Infrastructure/MoynaPay.Infrastructure.csproj" />
+    <Project Path="src/MoynaPay.Worker.Outbox/MoynaPay.Worker.Outbox.csproj" />
+    <Project Path="src/MoynaPay.Worker.Payments/MoynaPay.Worker.Payments.csproj" />
+    <Project Path="src/MoynaPay.Worker.Voice/MoynaPay.Worker.Voice.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MoynaPay.Check/MoynaPay.Check.csproj" />
+  </Folder>
+</Solution>
