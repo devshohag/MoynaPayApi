@@ -259,6 +259,51 @@ public sealed class MemoryWorkflowSessionStore(MemoryDatabase db) : IWorkflowSes
         return Task.CompletedTask;
     }
 
+    public Task<WorkflowSession?> TryLeaseNextAsync(string name, string runnerId, DateTimeOffset now,
+        TimeSpan leaseFor, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runnerId);
+
+        lock (db.Gate)
+        {
+            var session = db.WorkflowSessions.Values
+                .Where(s => s.Name == name && !s.Complete
+                    && (s.LeaseUntil is null || s.LeaseUntil <= now))
+                .OrderBy(s => s.UpdatedAt)
+                .FirstOrDefault();
+
+            if (session is null) return Task.FromResult<WorkflowSession?>(null);
+
+            session.LeaseOwner = runnerId;
+            session.LeaseUntil = now.Add(leaseFor);
+            session.UpdatedAt = now;
+            db.WorkflowSessions[Key(session.MerchantId, session.OrderId, session.Name)] = session;
+
+            return Task.FromResult<WorkflowSession?>(session);
+        }
+    }
+
+    public Task ReleaseAsync(WorkflowSession session, string runnerId, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentException.ThrowIfNullOrWhiteSpace(runnerId);
+
+        lock (db.Gate)
+        {
+            if (db.WorkflowSessions.TryGetValue(
+                    Key(session.MerchantId, session.OrderId, session.Name), out var current)
+                && current.LeaseOwner == runnerId)
+            {
+                current.LeaseOwner = null;
+                current.LeaseUntil = null;
+                db.WorkflowSessions[Key(current.MerchantId, current.OrderId, current.Name)] = current;
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
     private static string Key(Guid merchantId, Guid orderId, string name) =>
         $"{merchantId:N}:{orderId:N}:{name}";
 }

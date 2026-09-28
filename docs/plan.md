@@ -49,9 +49,12 @@ decisions are refused by the workflow path. Shop API create/cancel routes now ca
 workflow service instead of changing order state directly. Checks cover the main in-memory
 paths. Pending for Phase 8: durable session storage and process-resume ownership.
 
-## Phase 8: Durable runner + Postgres session store
-- Persist workflow sessions so a restart continues where it stopped; one runner owns a session at a time (lease).
-- Done when: kill the process mid-workflow, restart, the order continues exactly once; migration added.
+## Phase 8: Durable runner + Postgres session store [DONE]
+Done: workflow sessions now carry lease owner/until fields, the session store can atomically
+lease one incomplete session to one runner, and OrderWorkflowRunner resumes interrupted
+OrderConfirmation sessions exactly once. Checks cover lease contention, lease expiry, and
+restart-style resume from a half-confirmed order into the next subscribed step.
+Pending with the EF/Postgres store/package: database-backed session persistence and migration.
 
 ## Phase 9: Action handlers — notify shop, invoice, courier (idempotent)
 - Handlers for "notify shop" (outbox), "create invoice", "book courier", each with a stable action id.

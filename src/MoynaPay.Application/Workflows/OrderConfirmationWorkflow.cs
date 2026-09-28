@@ -63,28 +63,56 @@ public sealed class OrderWorkflowService(
 
         if (first.Outcome == TransitionOutcome.Moved && command.To == OrderStatus.Confirmed)
         {
-            var subscription = await merchants.SubscriptionAsync(command.MerchantId, ct).ConfigureAwait(false);
-            if (OrderLifecycle.AfterConfirmed(subscription) is { } next)
-            {
-                var follow = await transitions.ApplyAsync(new TransitionCommand
-                {
-                    MerchantId = command.MerchantId,
-                    OrderId = command.OrderId,
-                    To = next,
-                    By = Actor.Machine,
-                    Reason = "workflow advanced after confirmation",
-                    EventType = $"workflow.{next.ToString().ToLowerInvariant()}",
-                }, ct).ConfigureAwait(false);
-
-                if (follow.Outcome is TransitionOutcome.Moved or TransitionOutcome.Unchanged)
-                {
-                    order = follow.Order!;
-                    await RecordAsync(command.MerchantId, order, $"workflow.{next}", ct).ConfigureAwait(false);
-                }
-            }
+            order = await AdvanceAfterConfirmationAsync(command.MerchantId, order, ct).ConfigureAwait(false);
         }
 
         return new WorkflowDecisionResult(TransitionOutcome.Moved, order, null);
+    }
+
+    public async Task<WorkflowDecisionResult> ResumeAsync(WorkflowSession session,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        var order = await orders.FindByIdAsync(session.MerchantId, session.OrderId, ct)
+            .ConfigureAwait(false);
+        if (order is null) return new WorkflowDecisionResult(TransitionOutcome.NotFound, null, null);
+
+        if (order.Status == OrderStatus.Confirmed)
+        {
+            order = await AdvanceAfterConfirmationAsync(session.MerchantId, order, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            await RecordAsync(session.MerchantId, order, "workflow.resumed", ct).ConfigureAwait(false);
+        }
+
+        return new WorkflowDecisionResult(TransitionOutcome.Moved, order, null);
+    }
+
+    private async Task<Order> AdvanceAfterConfirmationAsync(Guid merchantId, Order order,
+        CancellationToken ct)
+    {
+        var subscription = await merchants.SubscriptionAsync(merchantId, ct).ConfigureAwait(false);
+        if (OrderLifecycle.AfterConfirmed(subscription) is not { } next) return order;
+
+        var follow = await transitions.ApplyAsync(new TransitionCommand
+        {
+            MerchantId = merchantId,
+            OrderId = order.Id,
+            To = next,
+            By = Actor.Machine,
+            Reason = "workflow advanced after confirmation",
+            EventType = $"workflow.{next.ToString().ToLowerInvariant()}",
+        }, ct).ConfigureAwait(false);
+
+        if (follow.Outcome is TransitionOutcome.Moved or TransitionOutcome.Unchanged)
+        {
+            order = follow.Order!;
+            await RecordAsync(merchantId, order, $"workflow.{next}", ct).ConfigureAwait(false);
+        }
+
+        return order;
     }
 
     private async Task RecordAsync(Guid merchantId, Order order, string eventName,
@@ -126,3 +154,26 @@ public sealed record WorkflowDecisionResult(
     TransitionOutcome Outcome,
     Order? Order,
     string? Reason);
+
+public sealed class OrderWorkflowRunner(
+    IWorkflowSessionStore sessions, OrderWorkflowService workflow, IClock clock)
+{
+    public async Task<bool> TickAsync(string runnerId, TimeSpan leaseFor,
+        CancellationToken ct = default)
+    {
+        var session = await sessions.TryLeaseNextAsync(
+            OrderWorkflowService.WorkflowName, runnerId, clock.UtcNow, leaseFor, ct).ConfigureAwait(false);
+        if (session is null) return false;
+
+        try
+        {
+            await workflow.ResumeAsync(session, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            await sessions.ReleaseAsync(session, runnerId, ct).ConfigureAwait(false);
+        }
+
+        return true;
+    }
+}

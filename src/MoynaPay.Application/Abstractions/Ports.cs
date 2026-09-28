@@ -88,6 +88,8 @@ public sealed class WorkflowSession
     public required string Name { get; init; }
     public string Step { get; set; } = "received";
     public bool Complete { get; set; }
+    public string? LeaseOwner { get; set; }
+    public DateTimeOffset? LeaseUntil { get; set; }
     public List<string> History { get; } = [];
     public DateTimeOffset UpdatedAt { get; set; }
 }
@@ -98,6 +100,11 @@ public interface IWorkflowSessionStore
         CancellationToken ct = default);
 
     Task SaveAsync(WorkflowSession session, CancellationToken ct = default);
+
+    Task<WorkflowSession?> TryLeaseNextAsync(string name, string runnerId, DateTimeOffset now,
+        TimeSpan leaseFor, CancellationToken ct = default);
+
+    Task ReleaseAsync(WorkflowSession session, string runnerId, CancellationToken ct = default);
 }
 
 public interface IOrderStore

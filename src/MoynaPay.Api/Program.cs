@@ -36,6 +36,7 @@ builder.Services.AddScoped<WebhookService>();
 builder.Services.AddScoped<CreateOrderService>();
 builder.Services.AddScoped<OrderTransitionService>();
 builder.Services.AddScoped<OrderWorkflowService>();
+builder.Services.AddScoped<OrderWorkflowRunner>();
 
 var app = builder.Build();
 

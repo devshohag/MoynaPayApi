@@ -356,6 +356,52 @@ await CheckAsync("workflow refuses illegal machine decisions", async () =>
         && h.Db.Orders[r.Order.Id].Status == OrderStatus.NeedsHuman;
 });
 
+await CheckAsync("workflow leases allow only one runner at a time", async () =>
+{
+    var h = WorkflowHarness();
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var first = await h.Sessions.TryLeaseNextAsync(
+        OrderWorkflowService.WorkflowName, "runner-a", now, TimeSpan.FromMinutes(1));
+    var second = await h.Sessions.TryLeaseNextAsync(
+        OrderWorkflowService.WorkflowName, "runner-b", now, TimeSpan.FromMinutes(1));
+    var expired = await h.Sessions.TryLeaseNextAsync(
+        OrderWorkflowService.WorkflowName, "runner-b", now.AddMinutes(2), TimeSpan.FromMinutes(1));
+
+    return first?.OrderId == r.Order!.Id
+        && second is null
+        && expired?.LeaseOwner == "runner-b";
+});
+
+await CheckAsync("workflow runner resumes an interrupted confirmation exactly once", async () =>
+{
+    var h = WorkflowHarness(calls: true, pay: true);
+    var r = await h.Workflow.CreateAsync(Cmd());
+    var order = h.Db.Orders[r.Order!.Id];
+    order.Status = OrderStatus.Confirmed;
+    order.ConfirmedAt = now;
+    order.UpdatedAt = now;
+    h.Db.Orders[order.Id] = order;
+
+    var session = (await h.Sessions.FindAsync(merchantId, order.Id, OrderWorkflowService.WorkflowName))!;
+    session.Step = OrderStatus.Confirmed.ToString();
+    session.Complete = false;
+    session.UpdatedAt = now.AddSeconds(-10);
+    await h.Sessions.SaveAsync(session);
+
+    var runner = new OrderWorkflowRunner(h.Sessions, h.Workflow, new FixedClock(now));
+    var first = await runner.TickAsync("runner-a", TimeSpan.FromMinutes(1));
+    var second = await runner.TickAsync("runner-a", TimeSpan.FromMinutes(1));
+    var saved = await h.Sessions.FindAsync(merchantId, order.Id, OrderWorkflowService.WorkflowName);
+
+    return first
+        && !second
+        && h.Db.Orders[order.Id].Status == OrderStatus.AwaitingPayment
+        && saved!.Complete
+        && saved.LeaseOwner is null
+        && h.Db.Events.Count(e => e.To == OrderStatus.AwaitingPayment) == 1;
+});
+
 // ---------------------------------------------------------------------------
 // Merchant onboarding and API keys
 // ---------------------------------------------------------------------------
