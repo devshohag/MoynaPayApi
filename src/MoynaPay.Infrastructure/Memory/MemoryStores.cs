@@ -27,6 +27,7 @@ public sealed class MemoryDatabase
     public ConcurrentDictionary<Guid, Order> Orders { get; } = new();
     public List<OrderEvent> Events { get; } = [];
     public List<OutboxMessage> Outbox { get; } = [];
+    public ConcurrentDictionary<string, WorkflowSession> WorkflowSessions { get; } = new(StringComparer.Ordinal);
 
     internal readonly object Gate = new();
 }
@@ -238,6 +239,28 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
             return Task.FromResult(rows);
         }
     }
+}
+
+public sealed class MemoryWorkflowSessionStore(MemoryDatabase db) : IWorkflowSessionStore
+{
+    public Task<WorkflowSession?> FindAsync(Guid merchantId, Guid orderId, string name,
+        CancellationToken ct = default)
+    {
+        db.WorkflowSessions.TryGetValue(Key(merchantId, orderId, name), out var session);
+        return Task.FromResult(session);
+    }
+
+    public Task SaveAsync(WorkflowSession session, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        db.WorkflowSessions[Key(session.MerchantId, session.OrderId, session.Name)] = session;
+
+        return Task.CompletedTask;
+    }
+
+    private static string Key(Guid merchantId, Guid orderId, string name) =>
+        $"{merchantId:N}:{orderId:N}:{name}";
 }
 
 /// <summary>

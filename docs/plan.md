@@ -41,10 +41,13 @@ and update WebhookEndpoint.LastDeliveredAt / LastFailureReason from delivery res
 cover register → signed test delivered, failure metadata, private URL rejection, and rotation
 making old signatures fail.
 
-## Phase 7: YoAIWorkflow integration — OrderConfirmation workflow
-- Bring in YoAIWorkflow (Shohag's own SDK) and model order confirmation as a workflow: new order → call/pay steps → outcome.
-- Every decision passes through the workflow; controllers never change order state directly.
-- Done when: an order goes through the workflow on the in-memory runner; checks cover the main paths.
+## Phase 7: YoAIWorkflow integration — OrderConfirmation workflow [DONE]
+Done: OrderConfirmation now runs through an in-memory workflow runner/session port:
+new order starts a workflow session, confirmation advances to the next subscribed step
+(payment/courier/end), unclear call outcomes move to human review, and illegal machine
+decisions are refused by the workflow path. Shop API create/cancel routes now call the
+workflow service instead of changing order state directly. Checks cover the main in-memory
+paths. Pending for Phase 8: durable session storage and process-resume ownership.
 
 ## Phase 8: Durable runner + Postgres session store
 - Persist workflow sessions so a restart continues where it stopped; one runner owns a session at a time (lease).

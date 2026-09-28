@@ -3,6 +3,7 @@ using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Orders;
 using MoynaPay.Application.Security;
+using MoynaPay.Application.Workflows;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
 using MoynaPay.Infrastructure.Memory;
@@ -184,6 +185,18 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
         new OrderTransitionService(orders, merchants, clock));
 }
 
+(MemoryDatabase Db, OrderWorkflowService Workflow, IWorkflowSessionStore Sessions) WorkflowHarness(
+    bool calls = true, bool pay = true, bool courier = false, bool webhook = true)
+{
+    var h = Harness(calls: calls, pay: pay, courier: courier, webhook: webhook);
+    var orders = new MemoryOrderStore(h.Db);
+    var merchants = new MemoryMerchantStore(h.Db);
+    var sessions = new MemoryWorkflowSessionStore(h.Db);
+    var clock = new FixedClock(now);
+
+    return (h.Db, new OrderWorkflowService(h.Create, h.Move, orders, merchants, sessions, clock), sessions);
+}
+
 CreateOrderCommand Cmd(string reference = "ORD-1", string msisdn = "01711223344", decimal amount = 1250m)
     => new()
     {
@@ -253,6 +266,94 @@ await CheckAsync("the first event records how the order arrived", async () =>
     var e = h.Db.Events.Single();
 
     return e.Type == "order.received" && e.Actor == Actor.Shop && e.To == OrderStatus.Calling;
+});
+
+// ---------------------------------------------------------------------------
+// OrderConfirmation workflow
+// ---------------------------------------------------------------------------
+await CheckAsync("workflow starts a session when an order arrives", async () =>
+{
+    var h = WorkflowHarness();
+    var r = await h.Workflow.CreateAsync(Cmd());
+    var session = await h.Sessions.FindAsync(merchantId, r.Order!.Id, OrderWorkflowService.WorkflowName);
+
+    return r.Outcome == CreateOrderOutcome.Created
+        && session is not null
+        && session.Step == OrderStatus.Calling.ToString()
+        && session.History.SequenceEqual(["order.received"]);
+});
+
+await CheckAsync("workflow confirmation advances into payment when enabled", async () =>
+{
+    var h = WorkflowHarness(calls: true, pay: true);
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var moved = await h.Workflow.DecideAsync(new WorkflowDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        To = OrderStatus.Confirmed,
+        By = Actor.Machine,
+        EventType = "order.confirmed",
+    });
+
+    var session = await h.Sessions.FindAsync(merchantId, r.Order.Id, OrderWorkflowService.WorkflowName);
+
+    return moved.Outcome == TransitionOutcome.Moved
+        && moved.Order!.Status == OrderStatus.AwaitingPayment
+        && h.Db.Outbox.Count == 1
+        && h.Db.Outbox[0].EventType == "order.confirmed"
+        && session!.Step == OrderStatus.AwaitingPayment.ToString()
+        && session.Complete;
+});
+
+await CheckAsync("workflow sends unclear call outcomes to human review", async () =>
+{
+    var h = WorkflowHarness(calls: true, pay: true);
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var moved = await h.Workflow.DecideAsync(new WorkflowDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        To = OrderStatus.NeedsHuman,
+        By = Actor.Machine,
+        Reason = "no answer",
+        EventType = "order.needs_human",
+    });
+
+    var session = await h.Sessions.FindAsync(merchantId, r.Order.Id, OrderWorkflowService.WorkflowName);
+
+    return moved.Outcome == TransitionOutcome.Moved
+        && moved.Order!.Status == OrderStatus.NeedsHuman
+        && session!.Step == OrderStatus.NeedsHuman.ToString()
+        && session.Complete;
+});
+
+await CheckAsync("workflow refuses illegal machine decisions", async () =>
+{
+    var h = WorkflowHarness(calls: true, pay: true);
+    var r = await h.Workflow.CreateAsync(Cmd());
+    await h.Workflow.DecideAsync(new WorkflowDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        To = OrderStatus.NeedsHuman,
+        By = Actor.Machine,
+        EventType = "order.needs_human",
+    });
+
+    var rejected = await h.Workflow.DecideAsync(new WorkflowDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order.Id,
+        To = OrderStatus.Rejected,
+        By = Actor.Machine,
+        EventType = "order.rejected",
+    });
+
+    return rejected.Outcome == TransitionOutcome.Refused
+        && h.Db.Orders[r.Order.Id].Status == OrderStatus.NeedsHuman;
 });
 
 // ---------------------------------------------------------------------------

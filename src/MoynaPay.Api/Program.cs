@@ -4,6 +4,7 @@ using MoynaPay.Api;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Orders;
+using MoynaPay.Application.Workflows;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
 using MoynaPay.Infrastructure;
@@ -34,6 +35,7 @@ builder.Services.AddScoped<MerchantService>();
 builder.Services.AddScoped<WebhookService>();
 builder.Services.AddScoped<CreateOrderService>();
 builder.Services.AddScoped<OrderTransitionService>();
+builder.Services.AddScoped<OrderWorkflowService>();
 
 var app = builder.Build();
 
@@ -222,7 +224,7 @@ app.MapPost("/v1/webhook/endpoint/rotate-secret", async (
 // Orders, from the shop.
 // ---------------------------------------------------------------------------
 app.MapPost("/v1/orders", async (
-    CreateOrderRequest request, HttpContext context, CreateOrderService service,
+    CreateOrderRequest request, HttpContext context, OrderWorkflowService workflow,
     CancellationToken ct) =>
 {
     if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
@@ -230,7 +232,7 @@ app.MapPost("/v1/orders", async (
         return Results.Unauthorized();
     }
 
-    var result = await service.CreateAsync(new CreateOrderCommand
+    var result = await workflow.CreateAsync(new CreateOrderCommand
     {
         MerchantId = merchantId,
         Reference = request.Reference ?? "",
@@ -277,7 +279,7 @@ app.MapGet("/v1/orders/{reference}", async (
 
 app.MapPost("/v1/orders/{reference}/cancel", async (
     string reference, CancelRequest? request, HttpContext context,
-    IOrderStore orders, OrderTransitionService transitions, CancellationToken ct) =>
+    IOrderStore orders, OrderWorkflowService workflow, CancellationToken ct) =>
 {
     if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
     {
@@ -287,7 +289,7 @@ app.MapPost("/v1/orders/{reference}/cancel", async (
     var order = await orders.FindByReferenceAsync(merchantId, reference, ct).ConfigureAwait(false);
     if (order is null) return Results.NotFound();
 
-    var result = await transitions.ApplyAsync(new TransitionCommand
+    var result = await workflow.DecideAsync(new WorkflowDecisionCommand
     {
         MerchantId = merchantId,
         OrderId = order.Id,

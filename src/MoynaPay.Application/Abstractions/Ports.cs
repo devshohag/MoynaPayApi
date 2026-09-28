@@ -81,6 +81,25 @@ public interface IWebhookSender
         CancellationToken ct = default);
 }
 
+public sealed class WorkflowSession
+{
+    public required Guid MerchantId { get; init; }
+    public required Guid OrderId { get; init; }
+    public required string Name { get; init; }
+    public string Step { get; set; } = "received";
+    public bool Complete { get; set; }
+    public List<string> History { get; } = [];
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public interface IWorkflowSessionStore
+{
+    Task<WorkflowSession?> FindAsync(Guid merchantId, Guid orderId, string name,
+        CancellationToken ct = default);
+
+    Task SaveAsync(WorkflowSession session, CancellationToken ct = default);
+}
+
 public interface IOrderStore
 {
     Task<Order?> FindByReferenceAsync(Guid merchantId, string reference, CancellationToken ct = default);
