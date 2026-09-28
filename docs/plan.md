@@ -68,9 +68,12 @@ checks. High-confidence confirm can execute through the workflow only when rules
 low-confidence, reschedule/review, reject, or rule-breaking proposals all go to NeedsHuman.
 Checks prove a high-confidence reject still goes to human review.
 
-## Phase 11: Review queue — claim, expiry, outcome
-- Queue of orders needing a person: claim with expiry, release, outcome (confirm / reject / call again), audit.
-- Done when: two reviewers cannot claim the same item; expired claims return; only a person can reject.
+## Phase 11: Review queue — claim, expiry, outcome [DONE]
+Done: orders in NeedsHuman now have a review queue service and signed API routes for list,
+claim, release, and outcome. Claims are atomic with expiry, active claims hide from the
+available queue, expired claims can be taken by another reviewer, and claim/release/outcome
+events are audited. Review outcomes run through the workflow as a merchant/person action:
+confirm, reject, or call again; machine rejection from review remains refused.
 
 ## Phase 12: App auth — OTP, token, refresh, logout, rate limit
 - /app/v1 login by phone OTP, access + refresh tokens, logout revokes refresh, rate limits on OTP and shop API.

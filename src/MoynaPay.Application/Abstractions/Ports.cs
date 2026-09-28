@@ -162,6 +162,14 @@ public interface IOrderStore
     Task SaveChangeAsync(Order order, OrderEvent change, OutboxMessage? notify,
         CancellationToken ct = default);
 
+    Task SaveAuditAsync(Order order, OrderEvent audit, CancellationToken ct = default);
+
+    Task<ReviewClaimStoreResult> TryClaimReviewAsync(Guid merchantId, Guid orderId,
+        string reviewer, DateTimeOffset now, TimeSpan claimFor, CancellationToken ct = default);
+
+    Task<ReviewReleaseStoreResult> ReleaseReviewClaimAsync(Guid merchantId, Guid orderId,
+        string reviewer, DateTimeOffset now, CancellationToken ct = default);
+
     Task<IReadOnlyList<Order>> ListAsync(Guid merchantId, OrderQuery query,
         CancellationToken ct = default);
 
@@ -187,3 +195,25 @@ public sealed record OrderQuery
     public int Take { get; init; } = 50;
     public DateTimeOffset? Before { get; init; }
 }
+
+public enum ReviewClaimStoreOutcome
+{
+    Claimed,
+    NotFound,
+    NotInReview,
+    AlreadyClaimed,
+}
+
+public sealed record ReviewClaimStoreResult(
+    ReviewClaimStoreOutcome Outcome, Order? Order, string? Reason);
+
+public enum ReviewReleaseStoreOutcome
+{
+    Released,
+    NotFound,
+    NotClaimed,
+    ClaimedByAnother,
+}
+
+public sealed record ReviewReleaseStoreResult(
+    ReviewReleaseStoreOutcome Outcome, Order? Order, string? Reason);

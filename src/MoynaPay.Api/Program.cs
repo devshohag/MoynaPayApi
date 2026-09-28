@@ -39,6 +39,7 @@ builder.Services.AddScoped<OrderWorkflowService>();
 builder.Services.AddScoped<OrderWorkflowRunner>();
 builder.Services.AddScoped<WorkflowActionHandlers>();
 builder.Services.AddScoped<AiProposalGate>();
+builder.Services.AddScoped<ReviewQueueService>();
 
 var app = builder.Build();
 
@@ -313,6 +314,112 @@ app.MapPost("/v1/orders/{reference}/cancel", async (
     };
 });
 
+// ---------------------------------------------------------------------------
+// Review queue, for orders the machine cannot safely decide.
+// ---------------------------------------------------------------------------
+app.MapGet("/v1/review/orders", async (
+    HttpContext context, ReviewQueueService reviews, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var rows = await reviews.ListAvailableAsync(merchantId, ct: ct).ConfigureAwait(false);
+
+    return Results.Ok(rows.Select(ReviewView));
+});
+
+app.MapPost("/v1/review/orders/{reference}/claim", async (
+    string reference, ReviewClaimRequest request, HttpContext context,
+    IOrderStore orders, ReviewQueueService reviews, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var order = await orders.FindByReferenceAsync(merchantId, reference, ct).ConfigureAwait(false);
+    if (order is null) return Results.NotFound();
+
+    var result = await reviews.ClaimAsync(new ReviewClaimCommand
+    {
+        MerchantId = merchantId,
+        OrderId = order.Id,
+        Reviewer = request.Reviewer,
+        ClaimFor = TimeSpan.FromSeconds(request.ClaimSeconds ?? 300),
+    }, ct).ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        ReviewClaimOutcome.Claimed => Results.Ok(ReviewView(result.Order!)),
+        ReviewClaimOutcome.NotFound => Results.NotFound(),
+        ReviewClaimOutcome.Invalid => Results.Problem(
+            title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapPost("/v1/review/orders/{reference}/release", async (
+    string reference, ReviewReleaseRequest request, HttpContext context,
+    IOrderStore orders, ReviewQueueService reviews, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var order = await orders.FindByReferenceAsync(merchantId, reference, ct).ConfigureAwait(false);
+    if (order is null) return Results.NotFound();
+
+    var result = await reviews.ReleaseAsync(new ReviewReleaseCommand
+    {
+        MerchantId = merchantId,
+        OrderId = order.Id,
+        Reviewer = request.Reviewer,
+    }, ct).ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        ReviewReleaseOutcome.Released => Results.Ok(ReviewView(result.Order!)),
+        ReviewReleaseOutcome.NotFound => Results.NotFound(),
+        ReviewReleaseOutcome.Invalid => Results.Problem(
+            title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapPost("/v1/review/orders/{reference}/outcome", async (
+    string reference, ReviewOutcomeRequest request, HttpContext context,
+    IOrderStore orders, ReviewQueueService reviews, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var order = await orders.FindByReferenceAsync(merchantId, reference, ct).ConfigureAwait(false);
+    if (order is null) return Results.NotFound();
+
+    var result = await reviews.DecideAsync(new ReviewDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = order.Id,
+        Reviewer = request.Reviewer,
+        Outcome = request.Outcome,
+        Reason = request.Reason,
+    }, ct).ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        ReviewDecisionOutcome.Moved or ReviewDecisionOutcome.Unchanged => Results.Ok(View(result.Order!)),
+        ReviewDecisionOutcome.NotFound => Results.NotFound(),
+        ReviewDecisionOutcome.Invalid => Results.Problem(
+            title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
 app.Run();
 
 static object View(Order order) => new
@@ -329,6 +436,22 @@ static object View(Order order) => new
     attempts = order.CallAttempts,
     createdAt = order.CreatedAt,
     confirmedAt = order.ConfirmedAt,
+    claimedBy = order.ClaimedBy,
+    claimedUntil = order.ClaimedUntil,
+};
+
+static object ReviewView(Order order) => new
+{
+    reference = order.Reference,
+    status = order.Status,
+    customerName = order.CustomerName,
+    msisdn = order.Msisdn,
+    amount = order.Amount,
+    summary = order.Summary,
+    reason = order.Reason,
+    claimedBy = order.ClaimedBy,
+    claimedUntil = order.ClaimedUntil,
+    createdAt = order.CreatedAt,
 };
 
 static object MerchantView(Merchant merchant) => new
@@ -427,6 +550,12 @@ public sealed record CreateOrderRequest(
     string? CallbackUrl);
 
 public sealed record CancelRequest(string? Reason);
+
+public sealed record ReviewClaimRequest(string? Reviewer, int? ClaimSeconds);
+
+public sealed record ReviewReleaseRequest(string? Reviewer);
+
+public sealed record ReviewOutcomeRequest(string? Reviewer, ReviewDecision Outcome, string? Reason);
 
 public sealed record CreateMerchantRequest(
     string? Name,

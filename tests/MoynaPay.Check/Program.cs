@@ -225,6 +225,23 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
     return (h.Db, new AiProposalGate(orders, workflow), workflow);
 }
 
+(MemoryDatabase Db, ReviewQueueService Reviews, OrderWorkflowService Workflow) ReviewHarness(
+    DateTimeOffset? at = null,
+    bool calls = true,
+    bool pay = false,
+    bool courier = false,
+    bool webhook = true)
+{
+    var h = Harness(calls: calls, pay: pay, courier: courier, webhook: webhook);
+    var orders = new MemoryOrderStore(h.Db);
+    var merchants = new MemoryMerchantStore(h.Db);
+    var sessions = new MemoryWorkflowSessionStore(h.Db);
+    var clock = new FixedClock(at ?? now);
+    var workflow = new OrderWorkflowService(h.Create, h.Move, orders, merchants, sessions, clock);
+
+    return (h.Db, new ReviewQueueService(orders, workflow, clock), workflow);
+}
+
 CreateOrderCommand Cmd(string reference = "ORD-1", string msisdn = "01711223344", decimal amount = 1250m)
     => new()
     {
@@ -559,6 +576,188 @@ await CheckAsync("AI proposals against lifecycle rules go to human review", asyn
 
     return gate.Outcome == AiGateOutcome.SentToReview
         && gate.Order!.Status == OrderStatus.NeedsHuman;
+});
+
+// ---------------------------------------------------------------------------
+// Review queue
+// ---------------------------------------------------------------------------
+async Task<(MemoryDatabase Db, ReviewQueueService Reviews, Order Order)> NeedsReview(
+    DateTimeOffset? at = null)
+{
+    var h = ReviewHarness(at: at);
+    var r = await h.Workflow.CreateAsync(Cmd());
+    await h.Workflow.DecideAsync(new WorkflowDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        To = OrderStatus.NeedsHuman,
+        By = Actor.Machine,
+        Reason = "unclear",
+        EventType = "order.needs_human",
+    });
+
+    return (h.Db, h.Reviews, h.Db.Orders[r.Order.Id]);
+}
+
+await CheckAsync("two reviewers cannot claim the same review item", async () =>
+{
+    var h = await NeedsReview();
+
+    var first = await h.Reviews.ClaimAsync(new ReviewClaimCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "rafi",
+        ClaimFor = TimeSpan.FromMinutes(5),
+    });
+    var second = await h.Reviews.ClaimAsync(new ReviewClaimCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "sadia",
+        ClaimFor = TimeSpan.FromMinutes(5),
+    });
+
+    return first.Outcome == ReviewClaimOutcome.Claimed
+        && second.Outcome == ReviewClaimOutcome.AlreadyClaimed
+        && h.Db.Orders[h.Order.Id].ClaimedBy == "rafi"
+        && h.Db.Events.Any(e => e.Type == "review.claimed" && e.ActorName == "rafi");
+});
+
+await CheckAsync("expired review claims return to the queue", async () =>
+{
+    var h = await NeedsReview();
+    await h.Reviews.ClaimAsync(new ReviewClaimCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "rafi",
+        ClaimFor = TimeSpan.FromSeconds(1),
+    });
+
+    var afterExpiry = ReviewHarness(at: now.AddSeconds(2));
+    afterExpiry.Db.Orders[h.Order.Id] = h.Db.Orders[h.Order.Id];
+    afterExpiry.Db.Events.AddRange(h.Db.Events);
+    var available = await afterExpiry.Reviews.ListAvailableAsync(merchantId);
+    var claimed = await afterExpiry.Reviews.ClaimAsync(new ReviewClaimCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "sadia",
+        ClaimFor = TimeSpan.FromMinutes(5),
+    });
+
+    return available.Any(o => o.Id == h.Order.Id)
+        && claimed.Outcome == ReviewClaimOutcome.Claimed
+        && afterExpiry.Db.Orders[h.Order.Id].ClaimedBy == "sadia";
+});
+
+await CheckAsync("reviewer can release a claim", async () =>
+{
+    var h = await NeedsReview();
+    await h.Reviews.ClaimAsync(new ReviewClaimCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "rafi",
+        ClaimFor = TimeSpan.FromMinutes(5),
+    });
+
+    var released = await h.Reviews.ReleaseAsync(new ReviewReleaseCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "rafi",
+    });
+
+    return released.Outcome == ReviewReleaseOutcome.Released
+        && h.Db.Orders[h.Order.Id].ClaimedBy is null
+        && h.Db.Events.Any(e => e.Type == "review.released" && e.ActorName == "rafi");
+});
+
+await CheckAsync("review outcome confirms through the workflow and clears the claim", async () =>
+{
+    var h = await NeedsReview();
+    await h.Reviews.ClaimAsync(new ReviewClaimCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "rafi",
+        ClaimFor = TimeSpan.FromMinutes(5),
+    });
+
+    var decided = await h.Reviews.DecideAsync(new ReviewDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "rafi",
+        Outcome = ReviewDecision.Confirm,
+        Reason = "customer confirmed",
+    });
+
+    var last = h.Db.Events[^1];
+
+    return decided.Outcome == ReviewDecisionOutcome.Moved
+        && h.Db.Orders[h.Order.Id].Status == OrderStatus.Confirmed
+        && h.Db.Orders[h.Order.Id].ClaimedBy is null
+        && last.Type == "order.confirmed"
+        && last.Actor == Actor.Merchant
+        && last.ActorName == "rafi";
+});
+
+await CheckAsync("review rejection is a person decision", async () =>
+{
+    var h = await NeedsReview();
+    await h.Reviews.ClaimAsync(new ReviewClaimCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "sadia",
+        ClaimFor = TimeSpan.FromMinutes(5),
+    });
+
+    var decided = await h.Reviews.DecideAsync(new ReviewDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "sadia",
+        Outcome = ReviewDecision.Reject,
+        Reason = "customer said no",
+    });
+
+    var last = h.Db.Events[^1];
+
+    return decided.Outcome == ReviewDecisionOutcome.Moved
+        && h.Db.Orders[h.Order.Id].Status == OrderStatus.Rejected
+        && last.Type == "order.rejected"
+        && last.Actor == Actor.Merchant
+        && last.ActorName == "sadia";
+});
+
+await CheckAsync("review can send an order to call again", async () =>
+{
+    var h = await NeedsReview();
+    await h.Reviews.ClaimAsync(new ReviewClaimCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "rafi",
+        ClaimFor = TimeSpan.FromMinutes(5),
+    });
+
+    var decided = await h.Reviews.DecideAsync(new ReviewDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = h.Order.Id,
+        Reviewer = "rafi",
+        Outcome = ReviewDecision.CallAgain,
+        Reason = "call later",
+    });
+
+    return decided.Outcome == ReviewDecisionOutcome.Moved
+        && h.Db.Orders[h.Order.Id].Status == OrderStatus.Calling
+        && h.Db.Orders[h.Order.Id].ClaimedBy is null
+        && h.Db.Events[^1].Type == "order.call_again";
 });
 
 // ---------------------------------------------------------------------------

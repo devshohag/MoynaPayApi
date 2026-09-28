@@ -223,11 +223,8 @@ public sealed class OrderTransitionService(
         }
 
         // A claim is about who is working on it now. Once it has moved, it is nobody's.
-        if (OrderLifecycle.IsClosed(command.To) || command.To is OrderStatus.Confirmed or OrderStatus.Rejected)
-        {
-            order.ClaimedBy = null;
-            order.ClaimedUntil = null;
-        }
+        order.ClaimedBy = null;
+        order.ClaimedUntil = null;
 
         var change = new OrderEvent
         {

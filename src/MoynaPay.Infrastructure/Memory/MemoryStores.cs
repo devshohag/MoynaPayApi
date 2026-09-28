@@ -199,6 +199,120 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
         return Task.CompletedTask;
     }
 
+    public Task SaveAuditAsync(Order order, OrderEvent audit, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(order);
+        ArgumentNullException.ThrowIfNull(audit);
+
+        lock (db.Gate)
+        {
+            db.Orders[order.Id] = order;
+            db.Events.Add(audit);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<ReviewClaimStoreResult> TryClaimReviewAsync(Guid merchantId, Guid orderId,
+        string reviewer, DateTimeOffset now, TimeSpan claimFor, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reviewer);
+
+        lock (db.Gate)
+        {
+            if (!db.Orders.TryGetValue(orderId, out var order)
+                || order.TenantId != merchantId
+                || order.IsDeleted)
+            {
+                return Task.FromResult(new ReviewClaimStoreResult(
+                    ReviewClaimStoreOutcome.NotFound, null, null));
+            }
+
+            if (order.Status != OrderStatus.NeedsHuman)
+            {
+                return Task.FromResult(new ReviewClaimStoreResult(
+                    ReviewClaimStoreOutcome.NotInReview, order, "The order is not waiting for review."));
+            }
+
+            if (order.IsClaimed(now) && !string.Equals(order.ClaimedBy, reviewer, StringComparison.Ordinal))
+            {
+                return Task.FromResult(new ReviewClaimStoreResult(
+                    ReviewClaimStoreOutcome.AlreadyClaimed, order, "The order is already claimed."));
+            }
+
+            order.ClaimedBy = reviewer;
+            order.ClaimedUntil = now.Add(claimFor);
+            order.UpdatedAt = now;
+            db.Orders[order.Id] = order;
+            db.Events.Add(new OrderEvent
+            {
+                TenantId = merchantId,
+                OrderId = order.Id,
+                Type = "review.claimed",
+                Actor = Actor.Merchant,
+                ActorName = reviewer,
+                From = order.Status,
+                To = order.Status,
+                At = now,
+            });
+
+            return Task.FromResult(new ReviewClaimStoreResult(
+                ReviewClaimStoreOutcome.Claimed, order, null));
+        }
+    }
+
+    public Task<ReviewReleaseStoreResult> ReleaseReviewClaimAsync(Guid merchantId, Guid orderId,
+        string reviewer, DateTimeOffset now, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reviewer);
+
+        lock (db.Gate)
+        {
+            if (!db.Orders.TryGetValue(orderId, out var order)
+                || order.TenantId != merchantId
+                || order.IsDeleted)
+            {
+                return Task.FromResult(new ReviewReleaseStoreResult(
+                    ReviewReleaseStoreOutcome.NotFound, null, null));
+            }
+
+            if (order.ClaimedBy is null || order.ClaimedUntil is null || order.ClaimedUntil <= now)
+            {
+                order.ClaimedBy = null;
+                order.ClaimedUntil = null;
+                db.Orders[order.Id] = order;
+
+                return Task.FromResult(new ReviewReleaseStoreResult(
+                    ReviewReleaseStoreOutcome.NotClaimed, order, "The order is not actively claimed."));
+            }
+
+            if (!string.Equals(order.ClaimedBy, reviewer, StringComparison.Ordinal))
+            {
+                return Task.FromResult(new ReviewReleaseStoreResult(
+                    ReviewReleaseStoreOutcome.ClaimedByAnother, order, "The order is claimed by someone else."));
+            }
+
+            order.ClaimedBy = null;
+            order.ClaimedUntil = null;
+            order.UpdatedAt = now;
+            db.Orders[order.Id] = order;
+            db.Events.Add(new OrderEvent
+            {
+                TenantId = merchantId,
+                OrderId = order.Id,
+                Type = "review.released",
+                Actor = Actor.Merchant,
+                ActorName = reviewer,
+                From = order.Status,
+                To = order.Status,
+                At = now,
+            });
+
+            return Task.FromResult(new ReviewReleaseStoreResult(
+                ReviewReleaseStoreOutcome.Released, order, null));
+        }
+    }
+
     public Task<IReadOnlyList<Order>> ListAsync(Guid merchantId, OrderQuery query,
         CancellationToken ct = default)
     {
