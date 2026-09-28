@@ -8,6 +8,7 @@ using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
 using MoynaPay.Infrastructure;
 using MoynaPay.Infrastructure.Memory;
+using MoynaPay.Infrastructure.Security;
 
 // MoynaPay - phase 1.
 //
@@ -40,12 +41,19 @@ var app = builder.Build();
 if (DependencyInjection.IsInMemory(app.Configuration))
 {
     app.Logger.LogWarning(
-        "In-memory stores. Orders do not survive a restart, and secrets are not encrypted. " +
-        "Development only.");
+        "In-memory stores. Orders do not survive a restart, and the default key ring is " +
+        "development only.");
 
     if (app.Environment.IsDevelopment())
     {
-        Seed(app.Services.GetRequiredService<MemoryDatabase>());
+        var db = app.Services.GetRequiredService<MemoryDatabase>();
+        Seed(db);
+        var migrated = SecretCipherMigration.MigratePlaintext(
+            db, app.Services.GetRequiredService<ISecretProtector>());
+        if (migrated > 0)
+        {
+            app.Logger.LogInformation("Migrated {Count} plaintext development secrets.", migrated);
+        }
     }
 }
 

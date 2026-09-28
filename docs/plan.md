@@ -27,10 +27,12 @@ and `mp_dev_demo` is seeded only in Development. Checks cover create → issue �
 revoked key lookup fails, other key still works, and bootstrap issue is first-key only.
 Pending with the EF/Postgres store: migration for the same rows.
 
-## Phase 5: Key ring — AES-GCM secret protector
-- Port YoPay's key ring: versioned keys, AES-GCM, key id in the cipher text, rotate without re-encrypting everything.
-- Implement ISecretProtector with it; migrate plaintext secrets from phase 4 on first start.
-- Done when: round-trip, tamper detection, old-key decrypt after rotation are checked; no plaintext secret in DB or logs.
+## Phase 5: Key ring — AES-GCM secret protector [DONE]
+Done: ISecretProtector now uses versioned AES-GCM ciphers with the key id in the cipher text,
+new secrets use the active key, old keys remain decrypt-only for rotation, and plaintext
+development secrets are migrated on first start. Checks cover round-trip, tamper detection,
+old-key decrypt after rotation, and plaintext-to-AES migration.
+Pending with the EF/Postgres store: database-backed migration for persisted plaintext rows.
 
 ## Phase 6: Webhook endpoint — register, test, rotate
 - API to register/update the shop webhook URL (validated with WebhookUrl rules), send a signed test event, rotate the signing secret.

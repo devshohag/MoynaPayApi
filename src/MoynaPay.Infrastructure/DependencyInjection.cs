@@ -2,6 +2,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Infrastructure.Memory;
+using MoynaPay.Infrastructure.Security;
 
 namespace MoynaPay.Infrastructure;
 
@@ -45,7 +46,8 @@ public static class DependencyInjection
             services.AddSingleton<IMerchantStore, MemoryMerchantStore>();
             services.AddSingleton<IOrderStore, MemoryOrderStore>();
             services.AddSingleton<INonceStore, MemoryNonceStore>();
-            services.AddSingleton<ISecretProtector, PlaintextSecretProtector>();
+            services.AddSingleton<ISecretProtector>(_ =>
+                AesGcmSecretProtector.FromConfiguration(configuration));
 
             return services;
         }

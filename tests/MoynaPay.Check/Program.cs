@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Orders;
@@ -5,6 +6,7 @@ using MoynaPay.Application.Security;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
 using MoynaPay.Infrastructure.Memory;
+using MoynaPay.Infrastructure.Security;
 
 // Every rule in phase 1, checked without a database, a network or a key.
 //
@@ -259,6 +261,27 @@ await CheckAsync("the first event records how the order arrived", async () =>
 MerchantService MerchantHarness(MemoryDatabase db, ISecretProtector? protector = null) =>
     new(new MemoryMerchantStore(db), protector ?? new PrefixProtector(), new FixedClock(now));
 
+static AesGcmSecretProtector AesProtector(string active, bool includeOld = false)
+{
+    var keys = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+    {
+        ["k1"] = Key(1),
+        ["old"] = Key(2),
+    };
+
+    if (active == "new" || includeOld) keys["new"] = Key(3);
+    if (!keys.ContainsKey(active)) keys[active] = Key(4);
+
+    return new AesGcmSecretProtector(active, keys);
+}
+
+static byte[] Key(byte seed)
+{
+    var bytes = new byte[32];
+    for (var i = 0; i < bytes.Length; i++) bytes[i] = (byte)(seed + i);
+    return bytes;
+}
+
 await CheckAsync("a merchant can be created with a subscription", async () =>
 {
     var db = new MemoryDatabase();
@@ -375,6 +398,82 @@ await CheckAsync("bootstrap key issue is only for the first key", async () =>
 
     return first.Outcome == IssueApiKeyOutcome.Issued
         && again.Outcome == IssueApiKeyOutcome.Refused;
+});
+
+Check("AES-GCM secret protector round-trips with the active key id in the cipher", () =>
+{
+    var protector = AesProtector("k1");
+    var cipher = protector.Protect("merchant-secret", out var keyRingId);
+
+    return keyRingId == "k1"
+        && cipher.StartsWith($"{AesGcmSecretProtector.Format}.k1.", StringComparison.Ordinal)
+        && cipher != "merchant-secret"
+        && protector.Unprotect(cipher, keyRingId) == "merchant-secret";
+});
+
+Check("AES-GCM secret protector detects tampering", () =>
+{
+    var protector = AesProtector("k1");
+    var cipher = protector.Protect("merchant-secret", out var keyRingId);
+    var tampered = cipher[..^1] + (cipher[^1] == 'A' ? 'B' : 'A');
+
+    try
+    {
+        protector.Unprotect(tampered, keyRingId);
+        return false;
+    }
+    catch (CryptographicException)
+    {
+        return true;
+    }
+});
+
+Check("AES-GCM rotation keeps old-key decrypt and uses the new active key", () =>
+{
+    var oldRing = AesProtector("old");
+    var oldCipher = oldRing.Protect("kept", out var oldKeyId);
+    var rotated = AesProtector("new", includeOld: true);
+    var newCipher = rotated.Protect("fresh", out var newKeyId);
+
+    return oldKeyId == "old"
+        && newKeyId == "new"
+        && rotated.Unprotect(oldCipher, oldKeyId) == "kept"
+        && rotated.Unprotect(newCipher, newKeyId) == "fresh";
+});
+
+Check("plaintext development secrets migrate into AES-GCM ciphers", () =>
+{
+    var db = new MemoryDatabase();
+    var merchantIdForSecret = Guid.CreateVersion7();
+    db.Credentials["mp_plain"] = new ApiCredential
+    {
+        TenantId = merchantIdForSecret,
+        KeyId = "mp_plain",
+        SecretCipher = "plain-secret",
+        KeyRingId = PlaintextSecretProtector.KeyRing,
+        Label = "legacy",
+    };
+    db.Webhooks[merchantIdForSecret] = new WebhookEndpoint
+    {
+        TenantId = merchantIdForSecret,
+        Url = "https://shop.example.com/hook",
+        SecretCipher = "hook-secret",
+        KeyRingId = PlaintextSecretProtector.KeyRing,
+    };
+
+    var protector = AesProtector("k1");
+    var migrated = SecretCipherMigration.MigratePlaintext(db, protector);
+
+    var credential = db.Credentials["mp_plain"];
+    var webhook = db.Webhooks[merchantIdForSecret];
+
+    return migrated == 2
+        && credential.KeyRingId == "k1"
+        && webhook.KeyRingId == "k1"
+        && credential.SecretCipher != "plain-secret"
+        && webhook.SecretCipher != "hook-secret"
+        && protector.Unprotect(credential.SecretCipher, credential.KeyRingId) == "plain-secret"
+        && protector.Unprotect(webhook.SecretCipher, webhook.KeyRingId) == "hook-secret";
 });
 
 // ---------------------------------------------------------------------------
