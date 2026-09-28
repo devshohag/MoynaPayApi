@@ -62,10 +62,11 @@ notify shop (outbox row), create invoice, and book courier. A completed action i
 on repeat, so running a handler twice has the effect of once. Checks cover duplicate
 execution for all three handlers.
 
-## Phase 10: AI proposal gate
-- AI may only PROPOSE (confirm / needs human / reschedule) with a confidence; business rules decide.
-- Below threshold or against a rule → review queue. AI never executes an action itself and never rejects.
-- Done when: checks prove a high-confidence "reject" still goes to a human.
+## Phase 10: AI proposal gate [DONE]
+Done: AI proposals now pass through AiProposalGate with confidence thresholds and lifecycle
+checks. High-confidence confirm can execute through the workflow only when rules allow it;
+low-confidence, reschedule/review, reject, or rule-breaking proposals all go to NeedsHuman.
+Checks prove a high-confidence reject still goes to human review.
 
 ## Phase 11: Review queue — claim, expiry, outcome
 - Queue of orders needing a person: claim with expiry, release, outcome (confirm / reject / call again), audit.

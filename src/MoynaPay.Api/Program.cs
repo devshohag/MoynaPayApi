@@ -38,6 +38,7 @@ builder.Services.AddScoped<OrderTransitionService>();
 builder.Services.AddScoped<OrderWorkflowService>();
 builder.Services.AddScoped<OrderWorkflowRunner>();
 builder.Services.AddScoped<WorkflowActionHandlers>();
+builder.Services.AddScoped<AiProposalGate>();
 
 var app = builder.Build();
 

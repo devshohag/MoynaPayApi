@@ -212,6 +212,19 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
     return (h.Db, new WorkflowActionHandlers(actionStore, orders, invoices, h.Move, clock), workflow);
 }
 
+(MemoryDatabase Db, AiProposalGate Gate, OrderWorkflowService Workflow) AiGateHarness(
+    bool calls = true, bool pay = false, bool courier = false, bool webhook = true)
+{
+    var h = Harness(calls: calls, pay: pay, courier: courier, webhook: webhook);
+    var orders = new MemoryOrderStore(h.Db);
+    var merchants = new MemoryMerchantStore(h.Db);
+    var sessions = new MemoryWorkflowSessionStore(h.Db);
+    var clock = new FixedClock(now);
+    var workflow = new OrderWorkflowService(h.Create, h.Move, orders, merchants, sessions, clock);
+
+    return (h.Db, new AiProposalGate(orders, workflow), workflow);
+}
+
 CreateOrderCommand Cmd(string reference = "ORD-1", string msisdn = "01711223344", decimal amount = 1250m)
     => new()
     {
@@ -467,6 +480,85 @@ await CheckAsync("book courier action books courier only once", async () =>
         && h.Db.Orders[r.Order.Id].Status == OrderStatus.Booked
         && h.Db.Orders[r.Order.Id].TrackingCode == $"PENDING-{r.Order.Reference}"
         && h.Db.Events.Count(e => e.Type == "order.booked") == 1;
+});
+
+await CheckAsync("AI high-confidence confirm may execute through the workflow", async () =>
+{
+    var h = AiGateHarness(calls: true, pay: false);
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var gate = await h.Gate.ApplyAsync(new AiProposal
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        Outcome = AiProposedOutcome.Confirm,
+        Confidence = 0.96,
+    });
+
+    return gate.Outcome == AiGateOutcome.Executed
+        && gate.Order!.Status == OrderStatus.Confirmed
+        && h.Db.Events.Any(e => e.Type == "order.confirmed");
+});
+
+await CheckAsync("AI high-confidence reject still goes to human review", async () =>
+{
+    var h = AiGateHarness(calls: true, pay: false);
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var gate = await h.Gate.ApplyAsync(new AiProposal
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        Outcome = AiProposedOutcome.Reject,
+        Confidence = 0.99,
+    });
+
+    return gate.Outcome == AiGateOutcome.SentToReview
+        && gate.Order!.Status == OrderStatus.NeedsHuman
+        && gate.Reason == "ai.reject_requires_human";
+});
+
+await CheckAsync("AI low-confidence proposals go to human review", async () =>
+{
+    var h = AiGateHarness(calls: true, pay: false);
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var gate = await h.Gate.ApplyAsync(new AiProposal
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        Outcome = AiProposedOutcome.Confirm,
+        Confidence = 0.50,
+    });
+
+    return gate.Outcome == AiGateOutcome.SentToReview
+        && gate.Order!.Status == OrderStatus.NeedsHuman
+        && gate.Reason == "ai.low_confidence";
+});
+
+await CheckAsync("AI proposals against lifecycle rules go to human review", async () =>
+{
+    var h = AiGateHarness(calls: true, pay: false);
+    var r = await h.Workflow.CreateAsync(Cmd());
+    await h.Workflow.DecideAsync(new WorkflowDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        To = OrderStatus.NeedsHuman,
+        By = Actor.Machine,
+        EventType = "order.needs_human",
+    });
+
+    var gate = await h.Gate.ApplyAsync(new AiProposal
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order.Id,
+        Outcome = AiProposedOutcome.Confirm,
+        Confidence = 0.95,
+    });
+
+    return gate.Outcome == AiGateOutcome.SentToReview
+        && gate.Order!.Status == OrderStatus.NeedsHuman;
 });
 
 // ---------------------------------------------------------------------------
