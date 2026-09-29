@@ -74,6 +74,7 @@ public static class DependencyInjection
             services.AddSingleton<IWorkflowActionStore, MemoryWorkflowActionStore>();
             services.AddSingleton<IAppAuthStore, MemoryAppAuthStore>();
             services.AddSingleton<IRateLimitStore, MemoryRateLimitStore>();
+            services.AddSingleton<IAppDeviceStore, MemoryAppDeviceStore>();
             services.AddSingleton<INonceStore, MemoryNonceStore>();
             services.AddSingleton<IOutboxStore, MemoryOutboxStore>();
 

@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.AppBootstrap;
+using MoynaPay.Application.AppDevices;
 using MoynaPay.Application.AppHome;
 using MoynaPay.Application.AppOrders;
 using MoynaPay.Application.AppSettings;
@@ -14,6 +15,7 @@ using MoynaPay.Application.Orders;
 using MoynaPay.Application.Workflows;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
+using MoynaPay.Domain.Payments;
 using MoynaPay.Infrastructure;
 using MoynaPay.Infrastructure.Memory;
 using MoynaPay.Infrastructure.Security;
@@ -49,6 +51,7 @@ builder.Services.AddScoped<AiProposalGate>();
 builder.Services.AddScoped<ReviewQueueService>();
 builder.Services.AddScoped<AppAuthService>();
 builder.Services.AddScoped<AppBootstrapService>();
+builder.Services.AddScoped<AppDevicesService>();
 builder.Services.AddScoped<AppHomeService>();
 builder.Services.AddScoped<AppOrderService>();
 builder.Services.AddScoped<AppOrderActionService>();
@@ -305,6 +308,84 @@ app.MapPut("/app/v1/settings/webhook", async (
         WebhookOutcome.Invalid => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
         _ => Results.NotFound(),
     };
+});
+
+app.MapGet("/app/v1/devices", async (
+    HttpContext context, AppAuthService auth, AppDevicesService devices,
+    CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    return Results.Ok(await devices.ListAsync(principal.MerchantId, ct).ConfigureAwait(false));
+});
+
+app.MapPost("/app/v1/devices/pairing-token", async (
+    HttpContext context, AppAuthService auth, AppDevicesService devices,
+    CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var result = await devices.CreatePairingTokenAsync(principal.MerchantId, ct)
+        .ConfigureAwait(false);
+
+    return Results.Created("/app/v1/devices/pairing-token", new
+    {
+        pairingToken = result.Token,
+        expiresAt = result.ExpiresAt,
+        expiresInSeconds = (int)AppDevicesService.PairingTtl.TotalSeconds,
+    });
+});
+
+app.MapPost("/app/v1/devices/pair", async (
+    AppDevicePairRequest request, AppDevicesService devices, CancellationToken ct) =>
+{
+    var result = await devices.PairAsync(new PairDeviceCommand(
+        request.PairingToken,
+        request.Fingerprint,
+        request.Name,
+        request.Model,
+        request.AppVersion,
+        request.PushToken,
+        request.PermissionState,
+        request.BatteryPercent,
+        request.NetworkType), ct).ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        PairDeviceOutcome.Paired => Results.Created($"/app/v1/devices/{result.Device!.Id}", new
+        {
+            device = result.Device,
+            deviceToken = result.DeviceToken,
+        }),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
+    };
+});
+
+app.MapPost("/app/v1/devices/{deviceId:guid}/heartbeat", async (
+    Guid deviceId, AppDeviceHeartbeatRequest request, HttpContext context,
+    AppDevicesService devices, CancellationToken ct) =>
+{
+    var result = await devices.HeartbeatAsync(
+        deviceId, DeviceToken(context), new DeviceHeartbeatCommand(
+            request.PermissionState,
+            request.BatteryPercent,
+            request.NetworkType,
+            request.AppVersion,
+            request.Model), ct).ConfigureAwait(false);
+
+    return DeviceUpdateResponse(result);
+});
+
+app.MapPut("/app/v1/devices/{deviceId:guid}/push-token", async (
+    Guid deviceId, AppDevicePushTokenRequest request, HttpContext context,
+    AppDevicesService devices, CancellationToken ct) =>
+{
+    var result = await devices.UpdatePushTokenAsync(
+        deviceId, DeviceToken(context), request.PushToken, ct).ConfigureAwait(false);
+
+    return DeviceUpdateResponse(result);
 });
 
 // ---------------------------------------------------------------------------
@@ -849,6 +930,20 @@ static IResult AppOrderActionResponse(AppOrderActionResult result) =>
         _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status409Conflict),
     };
 
+static string? DeviceToken(HttpContext context)
+{
+    var header = context.Request.Headers["X-MoynaPay-Device-Token"].ToString();
+    return string.IsNullOrWhiteSpace(header) ? null : header;
+}
+
+static IResult DeviceUpdateResponse(DeviceUpdateResult result) =>
+    result.Outcome switch
+    {
+        DeviceUpdateOutcome.Updated => Results.Ok(result.Device),
+        DeviceUpdateOutcome.Unauthorized => Results.Unauthorized(),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
+    };
+
 /// <summary>
 /// One merchant and one key, so the service can be driven the moment it starts.
 ///
@@ -939,3 +1034,23 @@ public sealed record AppProfileSettingsRequest(
     string? SupportMsisdn);
 
 public sealed record AppWebhookSettingsRequest(string? Url, bool? Active);
+
+public sealed record AppDevicePairRequest(
+    string? PairingToken,
+    string? Fingerprint,
+    string? Name,
+    string? Model,
+    string? AppVersion,
+    string? PushToken,
+    DevicePermissionState? PermissionState,
+    int? BatteryPercent,
+    string? NetworkType);
+
+public sealed record AppDeviceHeartbeatRequest(
+    DevicePermissionState? PermissionState,
+    int? BatteryPercent,
+    string? NetworkType,
+    string? AppVersion,
+    string? Model);
+
+public sealed record AppDevicePushTokenRequest(string? PushToken);

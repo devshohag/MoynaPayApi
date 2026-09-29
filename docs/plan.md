@@ -194,8 +194,13 @@ merchant has not bought that module. `/app/v1/settings/profile` updates persiste
 fields, and `/app/v1/settings/webhook` reuses the existing webhook URL guard. Checks cover
 module visibility, profile updates, API key/webhook settings, and private webhook refusal.
 
-## Phase 18: Devices — pair, heartbeat, push token
-- Pair the Android app with a one-time token, heartbeat endpoint, store push token.
+## Phase 18: Devices — pair, heartbeat, push token [DONE]
+Done: app-authenticated merchants can create a five-minute one-time pairing token;
+the Android app consumes it once to register a device and receive a separate device
+credential. Heartbeat and push-token updates authenticate with device id plus device
+token, store health fields and push token without returning the push token itself, and
+device listing stays merchant-scoped. Checks cover one-time pairing, expiry, heartbeat
+auth/update, push token storage, and tenant isolation.
 
 ## Phase 19: ARI client merge + outbound correlation fix [PARTIAL]
 Existing: src/MoynaPay.Infrastructure/Voice/AriClient.cs (ported).

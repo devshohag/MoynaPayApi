@@ -28,6 +28,9 @@ public sealed class MemoryDatabase
     public ConcurrentDictionary<Guid, AppOtpChallenge> AppOtps { get; } = new();
     public ConcurrentDictionary<string, AppToken> AppTokens { get; } = new(StringComparer.Ordinal);
     public ConcurrentDictionary<string, List<DateTimeOffset>> RateLimits { get; } = new(StringComparer.Ordinal);
+    public ConcurrentDictionary<string, AppDevicePairingToken> AppDevicePairingTokens { get; } =
+        new(StringComparer.Ordinal);
+    public ConcurrentDictionary<Guid, AppDevice> AppDevices { get; } = new();
 
     public ConcurrentDictionary<Guid, Order> Orders { get; } = new();
     public ConcurrentDictionary<Guid, Invoice> Invoices { get; } = new();
@@ -532,6 +535,85 @@ public sealed class MemoryRateLimitStore(MemoryDatabase db) : IRateLimitStore
             bucket.Add(now);
             return Task.FromResult(true);
         }
+    }
+}
+
+public sealed class MemoryAppDeviceStore(MemoryDatabase db) : IAppDeviceStore
+{
+    public Task SavePairingTokenAsync(AppDevicePairingToken token, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(token);
+
+        db.AppDevicePairingTokens[token.TokenHash] = token;
+
+        return Task.CompletedTask;
+    }
+
+    public Task<AppDevicePairingToken?> FindPairingTokenAsync(string tokenHash,
+        CancellationToken ct = default)
+    {
+        db.AppDevicePairingTokens.TryGetValue(tokenHash, out var token);
+
+        return Task.FromResult(token);
+    }
+
+    public Task ConsumePairingTokenAsync(AppDevicePairingToken token, Guid deviceId,
+        DateTimeOffset now, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(token);
+
+        lock (db.Gate)
+        {
+            if (db.AppDevicePairingTokens.TryGetValue(token.TokenHash, out var current)
+                && current.ConsumedAt is null)
+            {
+                current.ConsumedAt = now;
+                current.DeviceId = deviceId;
+                db.AppDevicePairingTokens[current.TokenHash] = current;
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task SaveDeviceAsync(AppDevice device, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+
+        db.AppDevices[device.Id] = device;
+
+        return Task.CompletedTask;
+    }
+
+    public Task<AppDevice?> FindDeviceAsync(Guid merchantId, Guid deviceId,
+        CancellationToken ct = default)
+    {
+        db.AppDevices.TryGetValue(deviceId, out var device);
+
+        return Task.FromResult(device is not null && device.MerchantId == merchantId
+            && device.IsActive ? device : null);
+    }
+
+    public Task<AppDevice?> FindByCredentialAsync(Guid deviceId, string deviceTokenHash,
+        CancellationToken ct = default)
+    {
+        db.AppDevices.TryGetValue(deviceId, out var device);
+
+        return Task.FromResult(device is not null
+            && device.IsActive
+            && string.Equals(device.DeviceTokenHash, deviceTokenHash, StringComparison.Ordinal)
+            ? device : null);
+    }
+
+    public Task<IReadOnlyList<AppDevice>> ListDevicesAsync(Guid merchantId,
+        CancellationToken ct = default)
+    {
+        IReadOnlyList<AppDevice> rows = db.AppDevices.Values
+            .Where(d => d.MerchantId == merchantId && d.IsActive)
+            .OrderByDescending(d => d.LastHeartbeatAt ?? d.CreatedAt)
+            .ToList();
+
+        return Task.FromResult(rows);
     }
 }
 

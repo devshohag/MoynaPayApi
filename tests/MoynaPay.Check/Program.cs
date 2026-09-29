@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.AppBootstrap;
+using MoynaPay.Application.AppDevices;
 using MoynaPay.Application.AppHome;
 using MoynaPay.Application.AppOrders;
 using MoynaPay.Application.AppSettings;
@@ -11,6 +12,7 @@ using MoynaPay.Application.Security;
 using MoynaPay.Application.Workflows;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
+using MoynaPay.Domain.Payments;
 using MoynaPay.Infrastructure.Memory;
 using MoynaPay.Infrastructure.Security;
 
@@ -380,6 +382,13 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
         merchants, new PrefixProtector(), new RecordingWebhookSender(true), h.Clock);
 
     return (h.Db, new AppSettingsService(merchants, webhooks, h.Clock));
+}
+
+(MemoryDatabase Db, AppDevicesService Devices, FixedClock Clock) AppDeviceHarness(DateTimeOffset? at = null)
+{
+    var h = AppAuthHarness(at);
+
+    return (h.Db, new AppDevicesService(new MemoryAppDeviceStore(h.Db), h.Clock), h.Clock);
 }
 
 Order AddOrder(MemoryDatabase db, string reference, OrderStatus status, DateTimeOffset createdAt,
@@ -818,6 +827,151 @@ await CheckAsync("app settings update webhook through the webhook guard", async 
         && h.Db.Webhooks[merchantId].Url == "https://shop.example.com/new-hook"
         && !h.Db.Webhooks[merchantId].Active
         && blocked.Outcome == WebhookOutcome.Invalid;
+});
+
+await CheckAsync("app device pairing token is one-time and returns a device credential", async () =>
+{
+    var h = AppDeviceHarness();
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var paired = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "install-1",
+        "Counter phone",
+        "Pixel",
+        "1.0.0",
+        "push-a",
+        DevicePermissionState.Healthy,
+        89,
+        "wifi"));
+    var replay = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "install-2",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null));
+
+    return paired.Outcome == PairDeviceOutcome.Paired
+        && paired.DeviceToken is not null
+        && paired.Device!.Fingerprint == "install-1"
+        && paired.Device.HasPushToken
+        && h.Db.AppDevices.Count == 1
+        && h.Db.AppDevicePairingTokens.Values.Single().ConsumedAt == now
+        && replay.Outcome == PairDeviceOutcome.Invalid;
+});
+
+await CheckAsync("expired app device pairing token cannot be consumed", async () =>
+{
+    var h = AppDeviceHarness();
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var later = AppDeviceHarness(now.Add(AppDevicesService.PairingTtl).AddSeconds(1));
+    later.Db.AppDevicePairingTokens[AppAuthService.Hash(issued.Token)] =
+        h.Db.AppDevicePairingTokens.Values.Single();
+
+    var paired = await later.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "late-install",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null));
+
+    return paired.Outcome == PairDeviceOutcome.Invalid && later.Db.AppDevices.IsEmpty;
+});
+
+await CheckAsync("app device heartbeat requires the device token and updates health", async () =>
+{
+    var h = AppDeviceHarness();
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var paired = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "install-1",
+        null,
+        null,
+        "1.0.0",
+        null,
+        DevicePermissionState.Unknown,
+        60,
+        "wifi"));
+
+    var refused = await h.Devices.HeartbeatAsync(
+        paired.Device!.Id, "wrong", new DeviceHeartbeatCommand(
+            DevicePermissionState.Healthy, 101, "4g", "1.1.0", "Galaxy"));
+    var updated = await h.Devices.HeartbeatAsync(
+        paired.Device.Id, paired.DeviceToken, new DeviceHeartbeatCommand(
+            DevicePermissionState.Healthy, 101, "4g", "1.1.0", "Galaxy"));
+
+    return refused.Outcome == DeviceUpdateOutcome.Unauthorized
+        && updated.Outcome == DeviceUpdateOutcome.Updated
+        && updated.Device!.PermissionState == DevicePermissionState.Healthy
+        && updated.Device.BatteryPercent == 100
+        && updated.Device.NetworkType == "4g"
+        && updated.Device.AppVersion == "1.1.0";
+});
+
+await CheckAsync("app device push token update is stored but never returned", async () =>
+{
+    var h = AppDeviceHarness();
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var paired = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "install-1",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null));
+
+    var updated = await h.Devices.UpdatePushTokenAsync(
+        paired.Device!.Id, paired.DeviceToken, "expo-token-1");
+
+    return updated.Outcome == DeviceUpdateOutcome.Updated
+        && updated.Device!.HasPushToken
+        && h.Db.AppDevices[paired.Device.Id].PushToken == "expo-token-1"
+        && updated.Device.ToString()!.Contains("expo-token-1", StringComparison.Ordinal) == false;
+});
+
+await CheckAsync("app device list is scoped to one merchant", async () =>
+{
+    var h = AppDeviceHarness();
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "mine",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null));
+
+    var otherMerchant = Guid.CreateVersion7();
+    h.Db.AppDevices[Guid.CreateVersion7()] = new AppDevice
+    {
+        Id = Guid.CreateVersion7(),
+        MerchantId = otherMerchant,
+        DeviceTokenHash = "other",
+        Fingerprint = "other",
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
+    var mine = await h.Devices.ListAsync(merchantId);
+    var theirs = await h.Devices.ListAsync(otherMerchant);
+
+    return mine.Count == 1
+        && mine[0].Fingerprint == "mine"
+        && theirs.Count == 1
+        && theirs[0].Fingerprint == "other";
 });
 
 await CheckAsync("an order is accepted and starts ringing", async () =>

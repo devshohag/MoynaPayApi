@@ -37,6 +37,8 @@ public sealed class MoynaPayDbContext(
 
     public DbSet<AppOtpChallenge> AppOtpChallenges => Set<AppOtpChallenge>();
     public DbSet<AppToken> AppTokens => Set<AppToken>();
+    public DbSet<AppDevicePairingToken> AppDevicePairingTokens => Set<AppDevicePairingToken>();
+    public DbSet<AppDevice> AppDevices => Set<AppDevice>();
 
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<OrderEvent> OrderEvents => Set<OrderEvent>();
@@ -148,6 +150,12 @@ public sealed class MoynaPayDbContext(
             .HasQueryFilter(x => !Tenant.HasValue || x.MerchantId == Tenant.Value);
 
         builder.Entity<AppToken>()
+            .HasQueryFilter(x => !Tenant.HasValue || x.MerchantId == Tenant.Value);
+
+        builder.Entity<AppDevicePairingToken>()
+            .HasQueryFilter(x => !Tenant.HasValue || x.MerchantId == Tenant.Value);
+
+        builder.Entity<AppDevice>()
             .HasQueryFilter(x => !Tenant.HasValue || x.MerchantId == Tenant.Value);
 
         builder.Entity<WorkflowSession>()

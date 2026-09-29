@@ -179,6 +179,49 @@ internal sealed class AppTokenConfiguration : IEntityTypeConfiguration<AppToken>
     }
 }
 
+internal sealed class AppDevicePairingTokenConfiguration : IEntityTypeConfiguration<AppDevicePairingToken>
+{
+    public void Configure(EntityTypeBuilder<AppDevicePairingToken> builder)
+    {
+        builder.ToTable("app_device_pairing_tokens", Schemas.Merchants);
+
+        builder.HasKey(x => x.Id);
+
+        builder.Property(x => x.TokenHash).HasMaxLength(128).IsRequired();
+
+        // A photographed QR code is useful once. This is the lookup that consumes it.
+        builder.HasIndex(x => x.TokenHash).IsUnique();
+
+        // Old, unused tokens are garbage; the sweep reads by expiry.
+        builder.HasIndex(x => x.ExpiresAt);
+    }
+}
+
+internal sealed class AppDeviceConfiguration : IEntityTypeConfiguration<AppDevice>
+{
+    public void Configure(EntityTypeBuilder<AppDevice> builder)
+    {
+        builder.ToTable("app_devices", Schemas.Merchants);
+
+        builder.HasKey(x => x.Id);
+
+        builder.Property(x => x.DeviceTokenHash).HasMaxLength(128).IsRequired();
+        builder.Property(x => x.Fingerprint).HasMaxLength(160).IsRequired();
+        builder.Property(x => x.Name).HasMaxLength(120);
+        builder.Property(x => x.Model).HasMaxLength(120);
+        builder.Property(x => x.AppVersion).HasMaxLength(40);
+        builder.Property(x => x.PushToken).HasMaxLength(500);
+        builder.Property(x => x.NetworkType).HasMaxLength(40);
+
+        // Heartbeat and push-token calls authenticate by device id + token, before any
+        // app user is involved.
+        builder.HasIndex(x => new { x.Id, x.DeviceTokenHash });
+
+        // The app's device list and the later offline alert both read by merchant.
+        builder.HasIndex(x => new { x.MerchantId, x.LastHeartbeatAt });
+    }
+}
+
 internal sealed class OrderConfiguration : IEntityTypeConfiguration<Order>
 {
     public void Configure(EntityTypeBuilder<Order> builder)

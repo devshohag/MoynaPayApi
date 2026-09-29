@@ -182,6 +182,60 @@ public interface IRateLimitStore
         CancellationToken ct = default);
 }
 
+public sealed class AppDevicePairingToken
+{
+    public required Guid Id { get; init; }
+    public required Guid MerchantId { get; init; }
+    public required string TokenHash { get; init; }
+    public required DateTimeOffset ExpiresAt { get; init; }
+    public DateTimeOffset? ConsumedAt { get; set; }
+    public Guid? DeviceId { get; set; }
+    public required DateTimeOffset CreatedAt { get; init; }
+
+    public bool IsUsable(DateTimeOffset now) => ConsumedAt is null && ExpiresAt > now;
+}
+
+public sealed class AppDevice
+{
+    public required Guid Id { get; init; }
+    public required Guid MerchantId { get; init; }
+    public required string DeviceTokenHash { get; init; }
+    public required string Fingerprint { get; init; }
+    public string? Name { get; set; }
+    public string? Model { get; set; }
+    public string? AppVersion { get; set; }
+    public string? PushToken { get; set; }
+    public DateTimeOffset? LastHeartbeatAt { get; set; }
+    public DevicePermissionState PermissionState { get; set; } = DevicePermissionState.Unknown;
+    public int? BatteryPercent { get; set; }
+    public string? NetworkType { get; set; }
+    public bool IsActive { get; set; } = true;
+    public required DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public interface IAppDeviceStore
+{
+    Task SavePairingTokenAsync(AppDevicePairingToken token, CancellationToken ct = default);
+
+    Task<AppDevicePairingToken?> FindPairingTokenAsync(string tokenHash,
+        CancellationToken ct = default);
+
+    Task ConsumePairingTokenAsync(AppDevicePairingToken token, Guid deviceId,
+        DateTimeOffset now, CancellationToken ct = default);
+
+    Task SaveDeviceAsync(AppDevice device, CancellationToken ct = default);
+
+    Task<AppDevice?> FindDeviceAsync(Guid merchantId, Guid deviceId,
+        CancellationToken ct = default);
+
+    Task<AppDevice?> FindByCredentialAsync(Guid deviceId, string deviceTokenHash,
+        CancellationToken ct = default);
+
+    Task<IReadOnlyList<AppDevice>> ListDevicesAsync(Guid merchantId,
+        CancellationToken ct = default);
+}
+
 public sealed class WorkflowSession
 {
     public required Guid MerchantId { get; init; }

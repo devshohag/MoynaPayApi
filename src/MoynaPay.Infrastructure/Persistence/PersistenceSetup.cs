@@ -29,6 +29,7 @@ public static class PersistenceSetup
         services.AddScoped<IInvoiceStore, EfInvoiceStore>();
         services.AddScoped<IAppAuthStore, EfAppAuthStore>();
         services.AddScoped<IRateLimitStore, EfRateLimitStore>();
+        services.AddScoped<IAppDeviceStore, EfAppDeviceStore>();
         services.AddScoped<IWorkflowSessionStore, EfWorkflowSessionStore>();
         services.AddScoped<IWorkflowActionStore, EfWorkflowActionStore>();
         services.AddScoped<INonceStore, EfNonceStore>();
