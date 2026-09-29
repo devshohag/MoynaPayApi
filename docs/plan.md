@@ -90,8 +90,12 @@ key count), and current order status counters. The order store now has an exact
 CountByStatus port so the bootstrap payload does not depend on a paged list. Checks cover
 the bootstrap payload and invalid-token refusal.
 
-## Phase 14: Home numbers
-- Today/7-day counts: new, confirmed, needs human, paid, shipped, failed calls; cheap queries with indexes.
+## Phase 14: Home numbers [DONE]
+Done: `/app/v1/home/numbers` accepts the app bearer token and returns today plus rolling
+7-day counts for new orders, confirmed, needs human, paid, shipped, and failed calls.
+Counts are read through a dedicated HomeMetrics order-store query over tenant + event time
++ event type/status, which is the index-friendly shape for the database store. Checks
+cover today/7-day windows, failed calls, and tenant isolation.
 
 ## Phase 15: Orders list, detail, timeline
 - Paged list with filters (status, date, search by phone/reference), detail, full event timeline.

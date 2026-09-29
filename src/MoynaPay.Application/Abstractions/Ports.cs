@@ -230,9 +230,27 @@ public interface IOrderStore
     Task<IReadOnlyDictionary<OrderStatus, int>> CountByStatusAsync(Guid merchantId,
         CancellationToken ct = default);
 
+    Task<HomeMetrics> HomeMetricsAsync(Guid merchantId, DateTimeOffset todayStart,
+        DateTimeOffset sevenDayStart, DateTimeOffset now, CancellationToken ct = default);
+
     Task<IReadOnlyList<OrderEvent>> TimelineAsync(Guid merchantId, Guid orderId,
         CancellationToken ct = default);
 }
+
+public sealed record HomeMetricWindow(
+    int New,
+    int Confirmed,
+    int NeedsHuman,
+    int Paid,
+    int Shipped,
+    int FailedCalls);
+
+public sealed record HomeMetrics(
+    DateTimeOffset TodayStart,
+    DateTimeOffset SevenDayStart,
+    DateTimeOffset AsOf,
+    HomeMetricWindow Today,
+    HomeMetricWindow SevenDays);
 
 public interface IInvoiceStore
 {

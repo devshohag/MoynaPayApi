@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.AppBootstrap;
+using MoynaPay.Application.AppHome;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Orders;
@@ -298,6 +299,39 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
         new AppBootstrapService(new MemoryMerchantStore(h.Db), new MemoryOrderStore(h.Db)));
 }
 
+(MemoryDatabase Db, AppAuthService Auth, AppHomeService Home) HomeHarness(DateTimeOffset? at = null)
+{
+    var h = AppAuthHarness(at);
+
+    return (h.Db, h.Auth, new AppHomeService(new MemoryOrderStore(h.Db), h.Clock));
+}
+
+void AddEvent(MemoryDatabase db, OrderStatus? to, string type, DateTimeOffset at, Guid? tenant = null)
+{
+    var orderId = Guid.CreateVersion7();
+    db.Orders[orderId] = new Order
+    {
+        Id = orderId,
+        TenantId = tenant ?? merchantId,
+        Reference = $"EV-{db.Orders.Count + 1}",
+        CustomerName = "Home",
+        Msisdn = "8801711111111",
+        Amount = 100,
+        Status = to ?? OrderStatus.Calling,
+        CreatedAt = at,
+        UpdatedAt = at,
+    };
+    db.Events.Add(new OrderEvent
+    {
+        TenantId = tenant ?? merchantId,
+        OrderId = orderId,
+        Type = type,
+        Actor = Actor.Machine,
+        To = to,
+        At = at,
+    });
+}
+
 CreateOrderCommand Cmd(string reference = "ORD-1", string msisdn = "01711223344", decimal amount = 1250m)
     => new()
     {
@@ -437,6 +471,51 @@ await CheckAsync("app bootstrap refuses an invalid access token", async () =>
     var principal = await h.Auth.ValidateAccessAsync("not-a-real-token");
 
     return principal is null;
+});
+
+await CheckAsync("home numbers split today and seven-day counts", async () =>
+{
+    var homeNow = new DateTimeOffset(2026, 9, 28, 15, 30, 0, TimeSpan.Zero);
+    var h = HomeHarness(homeNow);
+
+    AddEvent(h.Db, OrderStatus.Received, "order.received", homeNow.AddHours(-1));
+    AddEvent(h.Db, OrderStatus.Confirmed, "order.confirmed", homeNow.AddHours(-2));
+    AddEvent(h.Db, OrderStatus.NeedsHuman, "order.needs_human", homeNow.AddDays(-2));
+    AddEvent(h.Db, OrderStatus.Paid, "order.paid", homeNow.AddDays(-3));
+    AddEvent(h.Db, OrderStatus.Shipped, "order.shipped", homeNow.AddDays(-6));
+    AddEvent(h.Db, null, "call.failed", homeNow.AddDays(-1));
+    AddEvent(h.Db, OrderStatus.Confirmed, "order.confirmed", homeNow.AddDays(-8));
+
+    var numbers = await h.Home.NumbersAsync(merchantId);
+
+    return numbers.Today.New == 1
+        && numbers.Today.Confirmed == 1
+        && numbers.Today.NeedsHuman == 0
+        && numbers.Today.Paid == 0
+        && numbers.Today.Shipped == 0
+        && numbers.Today.FailedCalls == 0
+        && numbers.SevenDays.New == 1
+        && numbers.SevenDays.Confirmed == 1
+        && numbers.SevenDays.NeedsHuman == 1
+        && numbers.SevenDays.Paid == 1
+        && numbers.SevenDays.Shipped == 1
+        && numbers.SevenDays.FailedCalls == 1
+        && numbers.TodayStart == new DateTimeOffset(2026, 9, 28, 0, 0, 0, TimeSpan.Zero)
+        && numbers.SevenDayStart == new DateTimeOffset(2026, 9, 22, 0, 0, 0, TimeSpan.Zero);
+});
+
+await CheckAsync("home numbers stay inside one merchant", async () =>
+{
+    var homeNow = new DateTimeOffset(2026, 9, 28, 15, 30, 0, TimeSpan.Zero);
+    var h = HomeHarness(homeNow);
+    var otherMerchant = Guid.CreateVersion7();
+
+    AddEvent(h.Db, OrderStatus.Confirmed, "order.confirmed", homeNow.AddHours(-1));
+    AddEvent(h.Db, OrderStatus.Confirmed, "order.confirmed", homeNow.AddHours(-1), otherMerchant);
+
+    var numbers = await h.Home.NumbersAsync(merchantId);
+
+    return numbers.Today.Confirmed == 1 && numbers.SevenDays.Confirmed == 1;
 });
 
 await CheckAsync("an order is accepted and starts ringing", async () =>
@@ -1204,7 +1283,9 @@ Check("AES-GCM secret protector detects tampering", () =>
 {
     var protector = AesProtector("k1");
     var cipher = protector.Protect("merchant-secret", out var keyRingId);
-    var tampered = cipher[..^1] + (cipher[^1] == 'A' ? 'B' : 'A');
+    var firstPayloadDot = cipher.IndexOf('.', AesGcmSecretProtector.Format.Length + 1);
+    var tamperAt = firstPayloadDot + 1;
+    var tampered = cipher[..tamperAt] + (cipher[tamperAt] == 'A' ? 'B' : 'A') + cipher[(tamperAt + 1)..];
 
     try
     {

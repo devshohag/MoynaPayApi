@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.AppBootstrap;
+using MoynaPay.Application.AppHome;
 using MoynaPay.Api;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Abstractions;
@@ -44,6 +45,7 @@ builder.Services.AddScoped<AiProposalGate>();
 builder.Services.AddScoped<ReviewQueueService>();
 builder.Services.AddScoped<AppAuthService>();
 builder.Services.AddScoped<AppBootstrapService>();
+builder.Services.AddScoped<AppHomeService>();
 
 var app = builder.Build();
 
@@ -129,6 +131,15 @@ app.MapGet("/app/v1/bootstrap", async (
     var result = await bootstrap.GetAsync(principal.MerchantId, ct).ConfigureAwait(false);
 
     return result.Found ? Results.Ok(result.Bootstrap) : Results.Unauthorized();
+});
+
+app.MapGet("/app/v1/home/numbers", async (
+    HttpContext context, AppAuthService auth, AppHomeService home, CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    return Results.Ok(await home.NumbersAsync(principal.MerchantId, ct).ConfigureAwait(false));
 });
 
 // ---------------------------------------------------------------------------

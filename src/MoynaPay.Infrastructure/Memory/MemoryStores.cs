@@ -366,6 +366,37 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
         return Task.FromResult(counts);
     }
 
+    public Task<HomeMetrics> HomeMetricsAsync(Guid merchantId, DateTimeOffset todayStart,
+        DateTimeOffset sevenDayStart, DateTimeOffset now, CancellationToken ct = default)
+    {
+        lock (db.Gate)
+        {
+            var events = db.Events
+                .Where(e => e.TenantId == merchantId && e.At >= sevenDayStart && e.At <= now)
+                .ToList();
+
+            return Task.FromResult(new HomeMetrics(
+                todayStart,
+                sevenDayStart,
+                now,
+                Count(events.Where(e => e.At >= todayStart)),
+                Count(events)));
+        }
+
+        static HomeMetricWindow Count(IEnumerable<OrderEvent> events)
+        {
+            var rows = events.ToList();
+
+            return new HomeMetricWindow(
+                rows.Count(e => e.Type == "order.received"),
+                rows.Count(e => e.To == OrderStatus.Confirmed),
+                rows.Count(e => e.To == OrderStatus.NeedsHuman),
+                rows.Count(e => e.To == OrderStatus.Paid),
+                rows.Count(e => e.To == OrderStatus.Shipped),
+                rows.Count(e => e.Type == "call.failed"));
+        }
+    }
+
     public Task<IReadOnlyList<OrderEvent>> TimelineAsync(Guid merchantId, Guid orderId,
         CancellationToken ct = default)
     {
