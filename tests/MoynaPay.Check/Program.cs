@@ -314,6 +314,35 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
     return (h.Db, h.Auth, new AppOrderService(new MemoryOrderStore(h.Db)));
 }
 
+(MemoryDatabase Db, AppOrderActionService Actions, AppOrderService Orders) AppActionHarness(
+    DateTimeOffset? at = null,
+    bool calls = true,
+    bool pay = false,
+    bool courier = false)
+{
+    var h = AppAuthHarness(at);
+    h.Db.Subscriptions[merchantId] = new Subscription
+    {
+        TenantId = merchantId,
+        Calls = calls,
+        Payments = pay,
+        Courier = courier,
+        Plan = "trial",
+    };
+
+    var clock = new FixedClock(at ?? now);
+    var orderStore = new MemoryOrderStore(h.Db);
+    var merchants = new MemoryMerchantStore(h.Db);
+    var create = new CreateOrderService(orderStore, merchants, clock);
+    var move = new OrderTransitionService(orderStore, merchants, clock);
+    var sessions = new MemoryWorkflowSessionStore(h.Db);
+    var workflow = new OrderWorkflowService(create, move, orderStore, merchants, sessions, clock);
+    var appOrders = new AppOrderService(orderStore);
+    var reviews = new ReviewQueueService(orderStore, workflow, clock);
+
+    return (h.Db, new AppOrderActionService(appOrders, orderStore, workflow, reviews), appOrders);
+}
+
 Order AddOrder(MemoryDatabase db, string reference, OrderStatus status, DateTimeOffset createdAt,
     string customer = "Customer", string msisdn = "8801711111111", Guid? tenant = null)
 {
@@ -623,6 +652,88 @@ await CheckAsync("app order detail and timeline stay inside merchant", async () 
         && timeline.Count == 2
         && timeline[0].Type == "order.received"
         && timeline[1].Detail == "no answer";
+});
+
+await CheckAsync("app decision confirms through the workflow", async () =>
+{
+    var h = AppActionHarness(pay: true);
+    AddOrder(h.Db, "ACT-1", OrderStatus.NeedsHuman, now.AddMinutes(-1));
+
+    var result = await h.Actions.DecideAsync(
+        merchantId, "ACT-1", AppDecision.Confirm, "sadia", "customer confirmed");
+
+    return result.Outcome == AppOrderActionOutcome.Moved
+        && result.Order!.Status == OrderStatus.AwaitingPayment
+        && h.Db.Events.Any(e => e.Type == "order.confirmed" && e.ActorName == "sadia")
+        && h.Db.Events.Any(e => e.Type == "workflow.awaitingpayment");
+});
+
+await CheckAsync("app decision rejects only as a merchant action", async () =>
+{
+    var h = AppActionHarness();
+    AddOrder(h.Db, "ACT-2", OrderStatus.NeedsHuman, now.AddMinutes(-1));
+
+    var result = await h.Actions.DecideAsync(
+        merchantId, "ACT-2", AppDecision.Reject, "sadia", "customer said no");
+
+    return result.Outcome == AppOrderActionOutcome.Moved
+        && result.Order!.Status == OrderStatus.Rejected
+        && h.Db.Events.Any(e =>
+            e.Type == "order.rejected" && e.Actor == Actor.Merchant && e.ActorName == "sadia");
+});
+
+await CheckAsync("app recall reopens a rejected order through confirmation", async () =>
+{
+    var h = AppActionHarness(pay: true);
+    AddOrder(h.Db, "ACT-3", OrderStatus.Rejected, now.AddMinutes(-1));
+
+    var result = await h.Actions.RecallAsync(
+        merchantId, "ACT-3", "sadia", "wrong keypress");
+
+    return result.Outcome == AppOrderActionOutcome.Moved
+        && result.Order!.Status == OrderStatus.AwaitingPayment
+        && h.Db.Events.Any(e => e.Type == "order.recalled" && e.From == OrderStatus.Rejected);
+});
+
+await CheckAsync("app review claim uses the review queue rules", async () =>
+{
+    var h = AppActionHarness();
+    AddOrder(h.Db, "ACT-4", OrderStatus.NeedsHuman, now.AddMinutes(-1));
+
+    var first = await h.Actions.ClaimReviewAsync(
+        merchantId, "ACT-4", "rafi", TimeSpan.FromMinutes(5));
+    var second = await h.Actions.ClaimReviewAsync(
+        merchantId, "ACT-4", "sadia", TimeSpan.FromMinutes(5));
+
+    return first.Outcome == ReviewClaimOutcome.Claimed
+        && first.Order!.ClaimedBy == "rafi"
+        && second.Outcome == ReviewClaimOutcome.AlreadyClaimed;
+});
+
+await CheckAsync("app marks a booked order as shipped through the workflow", async () =>
+{
+    var h = AppActionHarness();
+    AddOrder(h.Db, "ACT-5", OrderStatus.Booked, now.AddMinutes(-1));
+
+    var result = await h.Actions.MarkShippedAsync(
+        merchantId, "ACT-5", "sadia", "handed to courier");
+
+    return result.Outcome == AppOrderActionOutcome.Moved
+        && result.Order!.Status == OrderStatus.Shipped
+        && result.Order.ShippedAt is not null
+        && h.Db.Events.Any(e => e.Type == "order.shipped" && e.Actor == Actor.Merchant);
+});
+
+await CheckAsync("app refuses shipping before the order is booked", async () =>
+{
+    var h = AppActionHarness();
+    AddOrder(h.Db, "ACT-6", OrderStatus.AwaitingPayment, now.AddMinutes(-1));
+
+    var result = await h.Actions.MarkShippedAsync(
+        merchantId, "ACT-6", "sadia", null);
+
+    return result.Outcome == AppOrderActionOutcome.Refused
+        && h.Db.Orders.Values.Single(o => o.Reference == "ACT-6").Status == OrderStatus.AwaitingPayment;
 });
 
 await CheckAsync("an order is accepted and starts ringing", async () =>

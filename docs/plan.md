@@ -104,9 +104,12 @@ take, and before-cursor filters. `/app/v1/orders/{reference}` returns order deta
 the app bearer token and stay scoped to the merchant. Checks cover filters, paging,
 detail, timeline ordering, and tenant isolation.
 
-## Phase 16: Order actions from the app
-- Decision (confirm/reject by merchant), recall (undo a machine "no"), claim for review, mark shipped.
-- All through the workflow; rejects only by a person.
+## Phase 16: Order actions from the app [DONE]
+Done: app routes can confirm/reject by merchant decision, recall a rejected order back
+through confirmation, claim an order in review, and mark a booked order shipped. State
+changes go through OrderWorkflowService, review claims reuse ReviewQueueService, and
+rejects are recorded as merchant/person actions. Checks cover confirm with workflow
+advance, reject actor, recall, claim contention, shipping, and shipping refusal.
 
 ## Phase 17: Settings
 - Calls (hours, retries, script), payments (wallets, matching mode), courier, webhook, API keys, subscription, profile.

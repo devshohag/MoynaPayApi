@@ -48,6 +48,7 @@ builder.Services.AddScoped<AppAuthService>();
 builder.Services.AddScoped<AppBootstrapService>();
 builder.Services.AddScoped<AppHomeService>();
 builder.Services.AddScoped<AppOrderService>();
+builder.Services.AddScoped<AppOrderActionService>();
 
 var app = builder.Build();
 
@@ -191,6 +192,70 @@ app.MapGet("/app/v1/orders/{reference}/timeline", async (
     if (order is null) return Results.NotFound();
 
     return Results.Ok(await appOrders.TimelineAsync(principal.MerchantId, reference, ct).ConfigureAwait(false));
+});
+
+app.MapPost("/app/v1/orders/{reference}/decision", async (
+    string reference, AppOrderDecisionRequest request, HttpContext context,
+    AppAuthService auth, AppOrderActionService actions, CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var actor = request.ActorName ?? principal.MerchantName;
+    var result = await actions.DecideAsync(
+        principal.MerchantId, reference, request.Decision, actor, request.Reason, ct)
+        .ConfigureAwait(false);
+
+    return AppOrderActionResponse(result);
+});
+
+app.MapPost("/app/v1/orders/{reference}/recall", async (
+    string reference, AppOrderReasonRequest request, HttpContext context,
+    AppAuthService auth, AppOrderActionService actions, CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var result = await actions.RecallAsync(
+        principal.MerchantId, reference, request.ActorName ?? principal.MerchantName,
+        request.Reason, ct).ConfigureAwait(false);
+
+    return AppOrderActionResponse(result);
+});
+
+app.MapPost("/app/v1/orders/{reference}/claim", async (
+    string reference, AppReviewClaimActionRequest request, HttpContext context,
+    AppAuthService auth, AppOrderActionService actions, CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var result = await actions.ClaimReviewAsync(
+        principal.MerchantId, reference, request.Reviewer ?? principal.MerchantName,
+        TimeSpan.FromSeconds(request.ClaimSeconds ?? 300), ct).ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        ReviewClaimOutcome.Claimed => Results.Ok(result.Order),
+        ReviewClaimOutcome.NotFound => Results.NotFound(),
+        ReviewClaimOutcome.Invalid => Results.Problem(
+            title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
+app.MapPost("/app/v1/orders/{reference}/ship", async (
+    string reference, AppOrderReasonRequest request, HttpContext context,
+    AppAuthService auth, AppOrderActionService actions, CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var result = await actions.MarkShippedAsync(
+        principal.MerchantId, reference, request.ActorName ?? principal.MerchantName,
+        request.Reason, ct).ConfigureAwait(false);
+
+    return AppOrderActionResponse(result);
 });
 
 // ---------------------------------------------------------------------------
@@ -667,6 +732,14 @@ static bool TryParseStatus(string? status, out OrderStatus? parsed)
     return true;
 }
 
+static IResult AppOrderActionResponse(AppOrderActionResult result) =>
+    result.Outcome switch
+    {
+        AppOrderActionOutcome.Moved or AppOrderActionOutcome.Unchanged => Results.Ok(result.Order),
+        AppOrderActionOutcome.NotFound => Results.NotFound(),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status409Conflict),
+    };
+
 /// <summary>
 /// One merchant and one key, so the service can be driven the moment it starts.
 ///
@@ -743,3 +816,9 @@ public sealed record AppOtpRequest(string? Phone);
 public sealed record AppOtpVerifyRequest(string? Phone, string? Otp);
 
 public sealed record AppRefreshRequest(string? RefreshToken);
+
+public sealed record AppOrderDecisionRequest(AppDecision Decision, string? ActorName, string? Reason);
+
+public sealed record AppOrderReasonRequest(string? ActorName, string? Reason);
+
+public sealed record AppReviewClaimActionRequest(string? Reviewer, int? ClaimSeconds);
