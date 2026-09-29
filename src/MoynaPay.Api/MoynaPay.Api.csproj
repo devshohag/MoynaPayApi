@@ -2,4 +2,16 @@
   <ItemGroup>
     <ProjectReference Include="..\MoynaPay.Infrastructure\MoynaPay.Infrastructure.csproj" />
   </ItemGroup>
+
+  <!-- dotnet ef builds the STARTUP project and looks for the design-time tools there.
+       Infrastructure references the same package with PrivateAssets=all, which is right - a
+       library must not push a tooling dependency onto whoever consumes it - but it also
+       means the reference does not flow here. So it is named again, under the same switch,
+       and stays out of a build that has no database in it. -->
+  <ItemGroup Condition="'$(UsePostgres)' == 'true'">
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
 </Project>

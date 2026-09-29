@@ -53,8 +53,10 @@ public static class DependencyInjection
 
         if (IsInMemory(configuration))
         {
-            // Development only. Phase 2 puts the EF Core stores on the other side of this
-            // branch - same ports, same registrations, different rows.
+            // Development only. The EF Core stores go on the other side of this branch in
+            // A2 - same ports, same registrations, different rows.
+            services.AddScoped<ITenantContext, TenantContext>();
+
             services.AddSingleton<MemoryDatabase>();
             services.AddSingleton<IMerchantStore, MemoryMerchantStore>();
             services.AddSingleton<IOrderStore, MemoryOrderStore>();
@@ -70,8 +72,15 @@ public static class DependencyInjection
             return services;
         }
 
+        // A1 maps the schema and generates the migration. The stores that read and write
+        // through it arrive in A2, so a connection string is not yet enough to run on.
+        // Refusing is the honest answer: starting and quietly serving from memory while a
+        // database sits there configured is how somebody spends an afternoon wondering why
+        // their tables are empty.
         throw new InvalidOperationException(
-            "A Postgres connection string is configured, but the database stores arrive in " +
-            "phase 2. Remove the connection string to run on the in-memory fallback.");
+            "A Postgres connection string is configured, but the EF stores arrive in A2. " +
+            "The schema and migration exist - run `dotnet ef database update` to create " +
+            "the tables - but nothing reads them yet. Remove the connection string to run " +
+            "on the in-memory fallback.");
     }
 }

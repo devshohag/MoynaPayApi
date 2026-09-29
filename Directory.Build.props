@@ -4,5 +4,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- The database switch, declared once for the whole solution.
+         Off by default, so the build stays package-free and everything above the stores
+         keeps running on memory.
+
+             $env:UsePostgres = "true"
+
+         MSBuild reads environment variables as properties, which is why one line reaches
+         `dotnet build`, `dotnet ef migrations add` and `dotnet ef database update` alike.
+         `dotnet ef` does not forward -p: to MSBuild, so the environment variable is the
+         only form that works for all three. -->
+    <UsePostgres Condition="'$(UsePostgres)' == ''">false</UsePostgres>
   </PropertyGroup>
 </Project>

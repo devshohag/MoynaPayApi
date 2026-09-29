@@ -24,6 +24,21 @@ public abstract class BaseEntity : ITenantOwned
     public bool IsDeleted { get; set; }
 
     /// <summary>
+    /// The optimistic concurrency token. Bumped on every update and compared in the WHERE
+    /// clause of that update, so two writers editing one row cannot both win: the second
+    /// one matches no row and is told, rather than silently overwriting a decision it
+    /// never saw.
+    ///
+    /// Postgres offers xmin for this at the cost of no column at all. The provider's
+    /// helper for it is not in Npgsql 9, so this is one bigint instead. It behaves the
+    /// same; the one thing it asks in return is that raw SQL updates bump it themselves.
+    ///
+    /// Named RowVersion, not Version, because ParserTemplate already has a Version of its
+    /// own and it means something else entirely.
+    /// </summary>
+    public long RowVersion { get; set; }
+
+    /// <summary>
     /// The same column as <see cref="TenantId"/>, under the name the payment module's
     /// code already uses.
     ///
