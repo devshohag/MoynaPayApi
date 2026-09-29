@@ -155,4 +155,26 @@ public class OutboxMessage : BaseEntity
     public DateTimeOffset NextAttemptAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? DeliveredAt { get; set; }
     public string? LastFailureReason { get; set; }
+
+    /// <summary>
+    /// Set when a dispatcher takes this row, cleared when it is finished with.
+    ///
+    /// The lease is what makes a crash survivable. A worker that dies between the POST and
+    /// the write has already told the shop something; the row stays claimed until the lease
+    /// runs out, and then another worker picks it up and tells them again. That is the
+    /// at-least-once bargain, and it is why the delivery id has to stay the same.
+    ///
+    /// A claim is not a lock. Two dispatchers cannot both hold one, because the claim is
+    /// taken with SKIP LOCKED inside a single statement - but an expired claim is not
+    /// honoured, so a dead worker cannot hold the queue.
+    /// </summary>
+    public string? ClaimedBy { get; set; }
+
+    public DateTimeOffset? ClaimedUntil { get; set; }
+
+    /// <summary>
+    /// Stopped trying. The shop was never told, and only a person can decide what to do
+    /// about it, so this is recorded rather than retried forever.
+    /// </summary>
+    public bool IsDead { get; set; }
 }

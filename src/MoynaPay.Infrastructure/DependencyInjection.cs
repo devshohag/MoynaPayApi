@@ -58,6 +58,8 @@ public static class DependencyInjection
         services.AddSingleton<ISecretProtector>(_ =>
             AesGcmSecretProtector.FromConfiguration(configuration, isDevelopment));
 
+        services.AddScoped<MoynaPay.Application.Outbox.OutboxDispatcher>();
+
         if (IsInMemory(configuration))
         {
             // Development only. The EF Core stores go on the other side of this branch in
@@ -73,6 +75,7 @@ public static class DependencyInjection
             services.AddSingleton<IAppAuthStore, MemoryAppAuthStore>();
             services.AddSingleton<IRateLimitStore, MemoryRateLimitStore>();
             services.AddSingleton<INonceStore, MemoryNonceStore>();
+            services.AddSingleton<IOutboxStore, MemoryOutboxStore>();
 
             return services;
         }

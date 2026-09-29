@@ -1895,6 +1895,15 @@ MoynaPay.Check.Modules.Run(Check);
 await MoynaPay.Check.Hardening.RunAsync(Check, CheckAsync);
 
 // ---------------------------------------------------------------------------
+// Phase 3: telling the shop
+//
+// The retry ladder, the ordering rule, the lease, and where a delivery is not
+// allowed to go - none of which can be seen by hand, because all of it is about
+// time and repetition.
+// ---------------------------------------------------------------------------
+await MoynaPay.Check.Outbox.RunAsync(Check, CheckAsync);
+
+// ---------------------------------------------------------------------------
 // Replay
 // ---------------------------------------------------------------------------
 await CheckAsync("a nonce cannot be used twice", async () =>
@@ -1947,5 +1956,19 @@ sealed class RecordingWebhookSender(bool succeeds) : IWebhookSender
         return Task.FromResult(succeeds
             ? new WebhookSendResult(true, 200, null)
             : new WebhookSendResult(false, null, "boom"));
+    }
+
+    /// <summary>The outbox half of the port. The phase 6 checks do not use it.</summary>
+    public Task<MoynaPay.Application.Outbox.DeliveryAttempt> DeliverAsync(
+        WebhookDelivery delivery, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(delivery);
+
+        LastUrl = delivery.Url;
+        LastBody = delivery.Body;
+
+        return Task.FromResult(succeeds
+            ? MoynaPay.Application.Outbox.DeliveryAttempt.Answered(200)
+            : MoynaPay.Application.Outbox.DeliveryAttempt.Unreachable("boom"));
     }
 }

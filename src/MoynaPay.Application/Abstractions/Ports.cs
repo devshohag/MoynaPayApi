@@ -80,9 +80,53 @@ public interface IMerchantStore
 
 public sealed record WebhookSendResult(bool Succeeded, int? StatusCode, string? FailureReason);
 
+/// <param name="DeliveryId">
+/// Stable across every retry of one message. It is what a shop deduplicates on, and it is
+/// the only reason at-least-once delivery is safe for them to accept.
+/// </param>
+public sealed record WebhookDelivery(
+    string Url, string Secret, string EventType, Guid DeliveryId, string Body, long Timestamp);
+
+/// <summary>
+/// The queue of results the shops have not been told about yet.
+///
+/// Claiming and finishing are separate calls on purpose. Between them sits a POST to
+/// somebody else's server, which can take ten seconds or never come back, and holding a
+/// database transaction open across that is how a connection pool dies at four in the
+/// morning.
+/// </summary>
+public interface IOutboxStore
+{
+    /// <summary>
+    /// Takes up to <paramref name="max"/> messages that are due, and leases them so no
+    /// other dispatcher takes the same ones.
+    ///
+    /// Never returns two messages for one order. A shop told an order was paid before it is
+    /// told the order was confirmed has to guess, and it will guess wrong - so the older
+    /// message must land first, and until it does the rest of that order's queue waits.
+    /// </summary>
+    Task<IReadOnlyList<OutboxMessage>> ClaimDueAsync(
+        string claimedBy, int max, DateTimeOffset now, DateTimeOffset leaseUntil,
+        CancellationToken ct = default);
+
+    /// <summary>Writes back what happened and releases the lease.</summary>
+    Task FinishAsync(OutboxMessage message, CancellationToken ct = default);
+}
+
 public interface IWebhookSender
 {
     Task<WebhookSendResult> SendAsync(WebhookEndpoint endpoint, string body, string signature,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// One delivery from the outbox.
+    ///
+    /// A second method rather than a change to the first, because they are not the same
+    /// call: the test above posts to the merchant's registered endpoint with a fixed event
+    /// name, and this one posts whatever the queue says, to a url an individual order may
+    /// have overridden, carrying the delivery id a shop deduplicates on.
+    /// </summary>
+    Task<Outbox.DeliveryAttempt> DeliverAsync(WebhookDelivery delivery,
         CancellationToken ct = default);
 }
 

@@ -32,6 +32,7 @@ public static class PersistenceSetup
         services.AddScoped<IWorkflowSessionStore, EfWorkflowSessionStore>();
         services.AddScoped<IWorkflowActionStore, EfWorkflowActionStore>();
         services.AddScoped<INonceStore, EfNonceStore>();
+        services.AddScoped<IOutboxStore, EfOutboxStore>();
 
         return services;
     }

@@ -239,16 +239,21 @@ internal sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<Outb
         builder.Property(x => x.EventType).HasMaxLength(60).IsRequired();
         builder.Property(x => x.PayloadJson).IsRequired();
         builder.Property(x => x.LastFailureReason).HasMaxLength(500);
+        builder.Property(x => x.ClaimedBy).HasMaxLength(120);
 
         // What the dispatcher asks for, every few seconds, forever: undelivered and due.
         // Partial so the index stays small - delivered rows are the overwhelming majority
         // and this query never reads one of them again.
-        builder.HasIndex(x => x.NextAttemptAt).HasFilter("delivered_at is null");
+        builder.HasIndex(x => x.NextAttemptAt)
+            .HasFilter("delivered_at is null and is_dead = false");
 
         // "Is there an older undelivered message for this order?", asked once per candidate
         // row by the claim query in phase 3.
         builder.HasIndex(x => new { x.OrderId, x.CreatedAt })
-            .HasFilter("delivered_at is null");
+            .HasFilter("delivered_at is null and is_dead = false");
+
+        // How a claimed batch is read back after the UPDATE that took it.
+        builder.HasIndex(x => x.ClaimedBy).HasFilter("claimed_by is not null");
     }
 }
 
