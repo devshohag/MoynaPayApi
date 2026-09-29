@@ -54,6 +54,8 @@ public interface IMerchantStore
 
     Task SaveMerchantAsync(Merchant merchant, Subscription subscription, CancellationToken ct = default);
 
+    Task SaveMerchantProfileAsync(Merchant merchant, CancellationToken ct = default);
+
     Task<Subscription> SubscriptionAsync(Guid merchantId, CancellationToken ct = default);
 
     /// <summary>Resolves a signing key to the merchant it belongs to. Null when revoked.</summary>

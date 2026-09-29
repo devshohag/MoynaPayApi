@@ -4,6 +4,7 @@ using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.AppBootstrap;
 using MoynaPay.Application.AppHome;
 using MoynaPay.Application.AppOrders;
+using MoynaPay.Application.AppSettings;
 using MoynaPay.Api;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Abstractions;
@@ -49,6 +50,7 @@ builder.Services.AddScoped<AppBootstrapService>();
 builder.Services.AddScoped<AppHomeService>();
 builder.Services.AddScoped<AppOrderService>();
 builder.Services.AddScoped<AppOrderActionService>();
+builder.Services.AddScoped<AppSettingsService>();
 
 var app = builder.Build();
 
@@ -256,6 +258,51 @@ app.MapPost("/app/v1/orders/{reference}/ship", async (
         request.Reason, ct).ConfigureAwait(false);
 
     return AppOrderActionResponse(result);
+});
+
+app.MapGet("/app/v1/settings", async (
+    HttpContext context, AppAuthService auth, AppSettingsService settings,
+    CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var result = await settings.GetAsync(principal.MerchantId, ct).ConfigureAwait(false);
+
+    return result.Found ? Results.Ok(result.Settings) : Results.Unauthorized();
+});
+
+app.MapPut("/app/v1/settings/profile", async (
+    AppProfileSettingsRequest request, HttpContext context, AppAuthService auth,
+    AppSettingsService settings, CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var result = await settings.UpdateProfileAsync(principal.MerchantId, new UpdateProfileSettings(
+        request.Name, request.TimeZone, request.Address, request.SupportMsisdn), ct)
+        .ConfigureAwait(false);
+
+    return result.Found ? Results.Ok(result.Settings) : Results.Unauthorized();
+});
+
+app.MapPut("/app/v1/settings/webhook", async (
+    AppWebhookSettingsRequest request, HttpContext context, AppAuthService auth,
+    AppSettingsService settings, CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var result = await settings.UpdateWebhookAsync(
+        principal.MerchantId, request.Url, request.Active ?? true, ct).ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        WebhookOutcome.Created => Results.Created("/app/v1/settings/webhook", WebhookView(result.Endpoint!)),
+        WebhookOutcome.Updated => Results.Ok(WebhookView(result.Endpoint!)),
+        WebhookOutcome.Invalid => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
+        _ => Results.NotFound(),
+    };
 });
 
 // ---------------------------------------------------------------------------
@@ -822,3 +869,11 @@ public sealed record AppOrderDecisionRequest(AppDecision Decision, string? Actor
 public sealed record AppOrderReasonRequest(string? ActorName, string? Reason);
 
 public sealed record AppReviewClaimActionRequest(string? Reviewer, int? ClaimSeconds);
+
+public sealed record AppProfileSettingsRequest(
+    string? Name,
+    string? TimeZone,
+    string? Address,
+    string? SupportMsisdn);
+
+public sealed record AppWebhookSettingsRequest(string? Url, bool? Active);

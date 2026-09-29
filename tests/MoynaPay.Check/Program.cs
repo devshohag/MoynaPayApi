@@ -3,6 +3,7 @@ using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.AppBootstrap;
 using MoynaPay.Application.AppHome;
 using MoynaPay.Application.AppOrders;
+using MoynaPay.Application.AppSettings;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Orders;
@@ -341,6 +342,44 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
     var reviews = new ReviewQueueService(orderStore, workflow, clock);
 
     return (h.Db, new AppOrderActionService(appOrders, orderStore, workflow, reviews), appOrders);
+}
+
+(MemoryDatabase Db, AppSettingsService Settings) AppSettingsHarness(
+    bool calls = true,
+    bool pay = true,
+    bool courier = false)
+{
+    var h = AppAuthHarness();
+    h.Db.Subscriptions[merchantId] = new Subscription
+    {
+        TenantId = merchantId,
+        Calls = calls,
+        Payments = pay,
+        Courier = courier,
+        Plan = "trial",
+    };
+    h.Db.Credentials["mp_settings"] = new ApiCredential
+    {
+        TenantId = merchantId,
+        KeyId = "mp_settings",
+        SecretCipher = "sealed:s",
+        KeyRingId = PrefixProtector.KeyRing,
+        Label = "settings",
+    };
+    h.Db.Webhooks[merchantId] = new WebhookEndpoint
+    {
+        TenantId = merchantId,
+        Url = "https://shop.example.com/hook",
+        SecretCipher = "sealed:s",
+        KeyRingId = PrefixProtector.KeyRing,
+        Active = true,
+    };
+
+    var merchants = new MemoryMerchantStore(h.Db);
+    var webhooks = new WebhookService(
+        merchants, new PrefixProtector(), new RecordingWebhookSender(true), h.Clock);
+
+    return (h.Db, new AppSettingsService(merchants, webhooks, h.Clock));
 }
 
 Order AddOrder(MemoryDatabase db, string reference, OrderStatus status, DateTimeOffset createdAt,
@@ -734,6 +773,51 @@ await CheckAsync("app refuses shipping before the order is booked", async () =>
 
     return result.Outcome == AppOrderActionOutcome.Refused
         && h.Db.Orders.Values.Single(o => o.Reference == "ACT-6").Status == OrderStatus.AwaitingPayment;
+});
+
+await CheckAsync("app settings expose only subscribed modules", async () =>
+{
+    var h = AppSettingsHarness(calls: true, pay: false, courier: true);
+
+    var result = await h.Settings.GetAsync(merchantId);
+
+    return result.Found
+        && result.Settings!.Calls is not null
+        && result.Settings.Payments is null
+        && result.Settings.Courier is not null
+        && result.Settings.ApiKeys.Count == 1
+        && result.Settings.Webhook?.Active == true;
+});
+
+await CheckAsync("app settings update the merchant profile", async () =>
+{
+    var h = AppSettingsHarness();
+
+    var result = await h.Settings.UpdateProfileAsync(merchantId, new UpdateProfileSettings(
+        "Updated Shop", "Asia/Dhaka", "Mirpur", "01712223344"));
+
+    var merchant = h.Db.Merchants[merchantId];
+
+    return result.Found
+        && result.Settings!.Profile.Name == "Updated Shop"
+        && result.Settings.Profile.Address == "Mirpur"
+        && result.Settings.Profile.SupportMsisdn == "8801712223344"
+        && merchant.Name == "Updated Shop";
+});
+
+await CheckAsync("app settings update webhook through the webhook guard", async () =>
+{
+    var h = AppSettingsHarness();
+
+    var updated = await h.Settings.UpdateWebhookAsync(
+        merchantId, "https://shop.example.com/new-hook", active: false);
+    var blocked = await h.Settings.UpdateWebhookAsync(
+        merchantId, "https://127.0.0.1/hook", active: true);
+
+    return updated.Outcome == WebhookOutcome.Updated
+        && h.Db.Webhooks[merchantId].Url == "https://shop.example.com/new-hook"
+        && !h.Db.Webhooks[merchantId].Active
+        && blocked.Outcome == WebhookOutcome.Invalid;
 });
 
 await CheckAsync("an order is accepted and starts ringing", async () =>

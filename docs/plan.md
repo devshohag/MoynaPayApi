@@ -111,9 +111,12 @@ changes go through OrderWorkflowService, review claims reuse ReviewQueueService,
 rejects are recorded as merchant/person actions. Checks cover confirm with workflow
 advance, reject actor, recall, claim contention, shipping, and shipping refusal.
 
-## Phase 17: Settings
-- Calls (hours, retries, script), payments (wallets, matching mode), courier, webhook, API keys, subscription, profile.
-- Only the modules the merchant subscribed to are exposed.
+## Phase 17: Settings [DONE]
+Done: `/app/v1/settings` returns profile, subscription, webhook, API keys, and only the
+subscribed module settings: calls, payments, and courier sections are omitted when the
+merchant has not bought that module. `/app/v1/settings/profile` updates persisted profile
+fields, and `/app/v1/settings/webhook` reuses the existing webhook URL guard. Checks cover
+module visibility, profile updates, API key/webhook settings, and private webhook refusal.
 
 ## Phase 18: Devices — pair, heartbeat, push token
 - Pair the Android app with a one-time token, heartbeat endpoint, store push token.

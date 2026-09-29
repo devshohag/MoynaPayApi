@@ -71,6 +71,25 @@ public sealed class MemoryMerchantStore(MemoryDatabase db) : IMerchantStore
         return Task.CompletedTask;
     }
 
+    public Task SaveMerchantProfileAsync(Merchant merchant, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(merchant);
+
+        lock (db.Gate)
+        {
+            if (!db.Merchants.TryGetValue(merchant.Id, out var existing)
+                || existing.TenantId != merchant.TenantId
+                || existing.IsDeleted)
+            {
+                throw new InvalidOperationException("merchant not found");
+            }
+
+            db.Merchants[merchant.Id] = merchant;
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task<Subscription> SubscriptionAsync(Guid merchantId, CancellationToken ct = default) =>
         Task.FromResult(db.Subscriptions.TryGetValue(merchantId, out var s)
             ? s
