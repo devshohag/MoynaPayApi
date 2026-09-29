@@ -25,9 +25,17 @@ public sealed class SignedRequestMiddleware(RequestDelegate next, ILogger<Signed
 
         var path = context.Request.Path.Value ?? "";
 
+        // /v1/merchants is not signed, because a merchant who does not exist yet has no key
+        // to sign with. It is NOT therefore public: it is gated on an operator credential
+        // in the routes themselves.
+        //
+        // This used to exempt the whole "/v1/merchants" prefix and stop there. That also
+        // exempted POST /v1/merchants/{id}/api-keys, which issues that merchant's signing
+        // secret - so anyone who had seen a merchant id, in a log line or a URL or the body
+        // of a webhook.test, could ask for the key and sign as that shop.
         if (!path.StartsWith("/v1/", StringComparison.Ordinal)
             || path == "/v1/health"
-            || path.StartsWith("/v1/merchants", StringComparison.Ordinal))
+            || OperatorRoutes.IsOperatorOnly(path))
         {
             await next(context).ConfigureAwait(false);
             return;

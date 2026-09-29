@@ -1888,6 +1888,13 @@ MoynaPay.Check.Vectors.Run(Check);
 MoynaPay.Check.Modules.Run(Check);
 
 // ---------------------------------------------------------------------------
+// The holes found in the review of 29 September
+//
+// Each of these failed before its fix; that is what makes them worth keeping.
+// ---------------------------------------------------------------------------
+await MoynaPay.Check.Hardening.RunAsync(Check, CheckAsync);
+
+// ---------------------------------------------------------------------------
 // Replay
 // ---------------------------------------------------------------------------
 await CheckAsync("a nonce cannot be used twice", async () =>

@@ -31,14 +31,25 @@ public static class DependencyInjection
         return string.IsNullOrWhiteSpace(configuration.GetConnectionString(ConnectionName));
     }
 
+    /// <param name="isDevelopment">
+    /// Hosts pass their own environment. Two things here are safe on a laptop and are not
+    /// safe anywhere else - the published fallback key ring, and the in-memory stores -
+    /// and neither can decide that for itself from configuration alone.
+    /// </param>
     public static IServiceCollection AddMoynaPay(
-        this IServiceCollection services, IConfiguration configuration)
+        this IServiceCollection services, IConfiguration configuration, bool isDevelopment)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configuration);
 
         services.AddSingleton<IClock, SystemClock>();
-        services.AddHttpClient<IWebhookSender, HttpWebhookSender>();
+
+        // Redirects off and a connect-time address check, because a string check on the
+        // url is not enough on its own: a host name is resolved when the connection is
+        // made, so "webhook.theirshop.com" pointing at 10.0.0.5 passes every check that
+        // reads text. See WebhookGuard.
+        services.AddHttpClient<IWebhookSender, HttpWebhookSender>()
+            .ConfigurePrimaryHttpMessageHandler(WebhookGuard.Handler);
 
         if (IsInMemory(configuration))
         {
@@ -54,7 +65,7 @@ public static class DependencyInjection
             services.AddSingleton<IRateLimitStore, MemoryRateLimitStore>();
             services.AddSingleton<INonceStore, MemoryNonceStore>();
             services.AddSingleton<ISecretProtector>(_ =>
-                AesGcmSecretProtector.FromConfiguration(configuration));
+                AesGcmSecretProtector.FromConfiguration(configuration, isDevelopment));
 
             return services;
         }

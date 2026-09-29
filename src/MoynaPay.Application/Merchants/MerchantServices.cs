@@ -25,6 +25,17 @@ public sealed class MerchantService(
             return new CreateMerchantResult(CreateMerchantOutcome.Invalid, null, "A valid owner phone is required.");
         }
 
+        // The owner's phone is not a detail on the record, it is the app login identity -
+        // AppAuthService resolves an OTP request to a merchant by this number. Two rows
+        // with the same number and the lookup picks by dictionary order, so a second
+        // merchant registered on somebody else's phone can take over their login.
+        var taken = await merchants.FindByMsisdnAsync(msisdn, ct).ConfigureAwait(false);
+        if (taken is not null)
+        {
+            return new CreateMerchantResult(
+                CreateMerchantOutcome.Invalid, null, "That owner phone is already registered.");
+        }
+
         var now = clock.UtcNow;
         var merchantId = Guid.CreateVersion7();
 

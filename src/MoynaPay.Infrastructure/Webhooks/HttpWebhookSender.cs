@@ -33,7 +33,25 @@ public sealed class HttpWebhookSender(HttpClient http) : IWebhookSender
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            return new WebhookSendResult(false, null, ex.Message);
+            // Described, not quoted. The merchant sees this reason in the API response, and
+            // the exact text of a connection failure - "No such host is known (internal-db
+            // .corp:5432)" against a refusal against a timeout - tells whoever asked which
+            // internal names and ports exist. They get the category; the log gets the rest.
+            return new WebhookSendResult(false, null, Describe(ex));
         }
     }
+
+    private static string Describe(Exception ex) => ex switch
+    {
+        TaskCanceledException => "the shop did not answer in time",
+
+        HttpRequestException http => http.HttpRequestError switch
+        {
+            HttpRequestError.NameResolutionError => "the host name could not be resolved",
+            HttpRequestError.SecureConnectionError => "the TLS certificate was not accepted",
+            _ => "the connection was refused or could not be made",
+        },
+
+        _ => "the delivery could not be made",
+    };
 }

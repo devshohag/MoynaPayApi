@@ -48,7 +48,15 @@ public sealed class AesGcmSecretProtector : ISecretProtector
         _activeKeyId = activeKeyId;
     }
 
-    public static AesGcmSecretProtector FromConfiguration(IConfiguration configuration)
+    /// <param name="isDevelopment">
+    /// Whether falling back to the key printed below is acceptable. It is not a detail:
+    /// the fallback key is in this repository, every clone has it, and it seals the HMAC
+    /// secret of every merchant on the instance. Outside development the service refuses
+    /// to start instead - a process that will not boot is a bad morning, and a process
+    /// that boots and encrypts a year of signing keys under a published key is a business.
+    /// </param>
+    public static AesGcmSecretProtector FromConfiguration(
+        IConfiguration configuration, bool isDevelopment)
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
@@ -60,6 +68,15 @@ public sealed class AesGcmSecretProtector : ISecretProtector
 
         if (configured.Count == 0)
         {
+            if (!isDevelopment)
+            {
+                throw new InvalidOperationException(
+                    "No secret key ring is configured. Set MoynaPay:Secrets:Keys:<id> to a " +
+                    "base64 32-byte key and MoynaPay:Secrets:ActiveKeyId to its id. There is " +
+                    "no default outside development: the development key is published in " +
+                    "this repository and would seal every merchant's signing secret.");
+            }
+
             configured[DefaultDevelopmentKeyId] = Convert.FromBase64String(
                 "VJHnI7xMTZzOq9ehUsq2bkt88AqXlHLR99OOOp6toR0=");
         }

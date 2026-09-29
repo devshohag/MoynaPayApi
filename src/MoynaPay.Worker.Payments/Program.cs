@@ -10,7 +10,7 @@ using MoynaPay.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddMoynaPay(builder.Configuration);
+builder.Services.AddMoynaPay(builder.Configuration, builder.Environment.IsDevelopment());
 builder.Services.AddHostedService<PaymentWorker>();
 
 var app = builder.Build();

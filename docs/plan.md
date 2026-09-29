@@ -3,21 +3,97 @@
 Read AGENTS.md first. Phases marked [DONE] are finished and must not be redone; read their code
 before building on them. [PARTIAL] means ported code already exists: extend it, do not rewrite it.
 
+**Mark a phase [DONE] only after reading the code it claims to have written.** On 29 September
+phases 2 and 3 were marked [DONE] in this file while neither existed in the repository - no
+`Persistence/` folder, no `PackageReference` to EF Core or Npgsql anywhere in the solution, and
+`MoynaPay.Infrastructure.csproj` still carrying the comment "Phase 2 adds Npgsql here. Until
+then...". Phases 4 to 17 were then built on top of that claim. They work, and they hold every
+merchant, order, API key and token in memory, so a restart loses all of it.
+
+A status line that is ahead of the code does not save time. It spends it, later, on somebody
+else.
+
 ## Phase 1: Domain, order lifecycle, shop API, signing [DONE]
 Done: order lifecycle (62 checks), Msisdn normalisation, idempotent POST /v1/orders, GET /v1/orders/{ref},
 POST /v1/orders/{ref}/cancel, signing middleware (replay, tamper, stale, unsigned), outbox rows written,
 YoPay signing vectors verified from tests/MoynaPay.Check/fixtures/yopay-vectors.json.
 Known gaps handled later: secret protection (phase 5), merchant/key API (phase 4), rate limit (phase 12).
 
-## Phase 2: EF Core + Postgres [DONE]
-Done: MoynaPayDbContext, reflection-applied tenant filter, configurations, enums as names, row_version
-concurrency token, nonces in the database, unique (tenant_id, reference) where not deleted, migration Initial.
+## Phase 2: EF Core + Postgres [NOT DONE]
+Nothing of this exists in the repository. There is no `src/MoynaPay.Infrastructure/Persistence/`,
+no `MoynaPayDbContext`, no configuration, no migration, and no `PackageReference` to EF Core or
+Npgsql in any project. `DependencyInjection.AddMoynaPay` throws if a connection string is set.
 
-## Phase 3: Outbox delivery [DONE]
-Done: dispatcher with per-order ordering, retry ladder 10s/1m/5m/30m/2h/6h/24h (8 attempts), dead-letter,
-410 stops / 404 retries, lease-based claim (claimed_by, claimed_until), X-MoynaPay-Delivery id,
-webhook URL checked as string and at connect time (private ranges blocked), 148 checks.
-Pending on the developer machine: migration OutboxDelivery.
+Everything runs on `MemoryDatabase`, a singleton of dictionaries: merchants, orders, API
+credentials, app tokens, OTP challenges, workflow sessions, rate limits. A restart loses all of
+it, and two processes do not see each other's data at all.
+
+Scope is now larger than it was when this line was first written. Phases 4-17 added
+`IInvoiceStore`, `IWorkflowSessionStore`, `IWorkflowActionStore`, `IAppAuthStore` and
+`IRateLimitStore`; every one of them needs an EF implementation, a configuration and a place in
+the migration. Do not copy a phase-2 design that only knew about phase 1.
+
+Do the transition race (see below) BEFORE this lands: the fix differs by store, and doing it
+after means writing it twice.
+
+## Phase 3: Outbox delivery [NOT DONE]
+`Worker.Outbox` still logs "Delivery arrives in phase 2" and its loop is empty. There is no
+dispatcher, no retry ladder, no dead-letter, and no 410 handling. `OutboxMessage` has
+`Attempts`, `NextAttemptAt`, `DeliveredAt` and `LastFailureReason` but no `ClaimedBy`,
+`ClaimedUntil` or `IsDead`, so nothing can lease a row.
+
+Outbox rows ARE written by `OrderTransitionService`. They are simply never read by anyone, so
+no shop has ever been told anything.
+
+`HttpWebhookSender` exists, but it sends one `webhook.test` on demand from phase 6 - it is not
+the dispatcher.
+
+## Open defects, found 29 September
+
+Fixed in this pass, each with a check that fails without the fix (174 checks):
+- `/v1/merchants/{id}/api-keys` was unsigned and ungated - a merchant id, which appears in
+  logs, URLs and webhook bodies, was enough to be issued that shop's signing secret. Both
+  onboarding routes now need `X-MoynaPay-Operator`; the path list is `OperatorRoutes`.
+- `AesGcmSecretProtector` fell back to a key printed in this repository, in every environment.
+  It now refuses to start outside Development with no key ring configured.
+- Webhook delivery followed redirects and never checked the address a host name resolves to.
+  `WebhookGuard` closes both, and failure reasons are described rather than quoted back, so a
+  merchant cannot map an internal network one webhook test at a time.
+- A review claim had no upper bound; `claimSeconds: 2000000000` took an order out of the queue
+  until 2090. Clamped to 30 minutes.
+- Merchant creation did not check the owner phone for uniqueness. That phone IS the app login,
+  so a second merchant on the same number takes over the first one's account.
+
+Still open, in the order they should be taken:
+1. **The transition race.** `OrderTransitionService.ApplyAsync` reads the order, checks the
+   rules, mutates and saves, with no lock and no concurrency token, against singleton stores.
+   Measured: a `Booked` order shipped and cancelled at once ends `Cancelled` 16 times in 30,000;
+   two staff deciding a `NeedsHuman` order are BOTH told "Moved" 400 times out of 400, and the
+   shop is queued `order.confirmed` and `order.rejected` for the same order. Fix with one port -
+   `TryTransitionAsync(expected, to)` - that the memory store honours with a per-order lock and
+   the EF store with `row_version`.
+2. **`order.paid` can be sent with no `order.confirmed` before it.** `OrderLifecycle` line 41
+   allows `Received → AwaitingPayment`, and `FirstStep` returns `AwaitingPayment` for a
+   payments-without-calls merchant, so `Confirmed` is never on the path and `ConfirmedAt` is
+   never stamped.
+3. **Create is not idempotent for a padded reference.** `CreateOrderService` looks up the raw
+   `Reference` and stores `Reference.Trim()`, so retrying `"ORD-9 "` throws
+   `duplicate reference` - a 500, forever, on exactly the retry idempotency exists for.
+4. **The review queue pages before it filters.** `ListAvailableAsync` takes the newest 50 and
+   then drops claimed ones, so the oldest unreviewed orders are permanently invisible on a busy
+   shop.
+5. **`OrderWorkflowService.DecideAsync` returns `Moved` for a no-op** and re-records the event,
+   which makes `ReviewDecisionOutcome.Unchanged` dead code. Its `session.Complete` set also
+   omits `Rejected`, `Calling` and `Shipped`, so those sessions are re-leased forever once a
+   worker hosts the runner.
+6. **A workflow action that aborts before its side effect can never run again.** The `Started`
+   row is written first and is never cleared on the `order-not-found` path or on a throw, so the
+   courier is never booked and no retry fixes it.
+7. **Refresh rotation is read-then-write**, so one refresh token can yield two valid families,
+   and a reused token is not detected even though `ReplacedByHash` is recorded.
+8. **Logout leaves the access token live** for up to 15 minutes.
+9. **Nonces are kept for one tolerance window; a signature is valid for two.** A shop whose
+   clock is a few minutes fast opens a replay gap.
 
 ## Phase 4: Merchant, subscription, API key issue and revoke [DONE]
 Done: merchant onboarding creates merchant + subscription (calls/payments/courier flags), API credentials

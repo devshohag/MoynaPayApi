@@ -11,6 +11,17 @@ public sealed class ReviewQueueService(
 {
     public static readonly TimeSpan DefaultClaimFor = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// The longest a reviewer may hold an order. Long enough to look something up or make
+    /// a call; short enough that a reviewer who walks away does not strand the order.
+    /// </summary>
+    public static readonly TimeSpan MaxClaimFor = TimeSpan.FromMinutes(30);
+
+    public static TimeSpan Clamp(TimeSpan claimFor) =>
+        claimFor <= TimeSpan.Zero ? DefaultClaimFor
+        : claimFor > MaxClaimFor ? MaxClaimFor
+        : claimFor;
+
     public async Task<IReadOnlyList<Order>> ListAvailableAsync(Guid merchantId,
         int take = 50, CancellationToken ct = default)
     {
@@ -36,7 +47,10 @@ public sealed class ReviewQueueService(
                 ReviewClaimOutcome.Invalid, null, "reviewer is required"));
         }
 
-        var claimFor = command.ClaimFor <= TimeSpan.Zero ? DefaultClaimFor : command.ClaimFor;
+        // Clamped at both ends. The caller picks this, and a claim of two billion seconds
+        // takes the order out of the queue until 2090: nobody else can review it, and the
+        // customer waits forever for a call that a person was supposed to decide about.
+        var claimFor = Clamp(command.ClaimFor);
         return ClaimCoreAsync(command.MerchantId, command.OrderId, reviewer, claimFor, ct);
     }
 

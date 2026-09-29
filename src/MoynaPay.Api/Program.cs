@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using MoynaPay.Application.AppAuth;
@@ -34,7 +36,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 // Stores, clock and secret protection all come from one place, chosen by configuration.
 // The host does not know or care which it got.
-builder.Services.AddMoynaPay(builder.Configuration);
+builder.Services.AddMoynaPay(builder.Configuration, builder.Environment.IsDevelopment());
 
 builder.Services.AddScoped<MerchantService>();
 builder.Services.AddScoped<WebhookService>();
@@ -308,9 +310,17 @@ app.MapPut("/app/v1/settings/webhook", async (
 // ---------------------------------------------------------------------------
 // Merchant onboarding and API keys.
 // ---------------------------------------------------------------------------
+// Neither of these two routes is signed - a merchant who does not exist yet has no key to
+// sign with - so both are gated on an operator credential instead. A merchant id is not a
+// credential: it appears in URLs, in logs, and in the body of a webhook.test posted to a
+// third party, and before this check anyone holding one could ask for that shop's signing
+// secret and then sign as the shop.
 app.MapPost("/v1/merchants", async (
-    CreateMerchantRequest request, MerchantService service, CancellationToken ct) =>
+    CreateMerchantRequest request, HttpContext context, IConfiguration config,
+    MerchantService service, CancellationToken ct) =>
 {
+    if (RefuseOperator(context, config) is { } refusal) return refusal;
+
     var result = await service.CreateAsync(new CreateMerchantCommand
     {
         Name = request.Name,
@@ -333,8 +343,11 @@ app.MapPost("/v1/merchants", async (
 });
 
 app.MapPost("/v1/merchants/{merchantId:guid}/api-keys", async (
-    Guid merchantId, IssueApiKeyRequest request, MerchantService service, CancellationToken ct) =>
+    Guid merchantId, IssueApiKeyRequest request, HttpContext context, IConfiguration config,
+    MerchantService service, CancellationToken ct) =>
 {
+    if (RefuseOperator(context, config) is { } refusal) return refusal;
+
     var result = await service.IssueKeyAsync(merchantId, request.Label, bootstrapOnly: true, ct)
         .ConfigureAwait(false);
 
@@ -658,6 +671,43 @@ app.MapPost("/v1/review/orders/{reference}/outcome", async (
 });
 
 app.Run();
+
+/// <summary>
+/// The gate on the two unsigned onboarding routes. Null means let it through.
+///
+/// With no token configured the routes are open on a laptop, where there is nothing yet to
+/// protect, and closed everywhere else. Closed rather than open, because the failure of the
+/// open version is silent: the service starts, answers, and hands out signing secrets.
+/// </summary>
+static IResult? RefuseOperator(HttpContext context, IConfiguration config)
+{
+    var expected = config["MoynaPay:OperatorToken"];
+
+    if (string.IsNullOrWhiteSpace(expected))
+    {
+        var environment = context.RequestServices.GetRequiredService<IWebHostEnvironment>();
+
+        return environment.IsDevelopment()
+            ? null
+            : Results.Problem(
+                title: "Onboarding is closed: set MoynaPay:OperatorToken to open it.",
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    var presented = context.Request.Headers["X-MoynaPay-Operator"].ToString();
+
+    return SameSecret(expected, presented) ? null : Results.Unauthorized();
+}
+
+/// <summary>
+/// Compared as digests rather than as bytes, so neither the timing nor the length of the
+/// comparison says anything about the token. Guessing it one character at a time is the
+/// attack an ordinary string equality allows.
+/// </summary>
+static bool SameSecret(string expected, string presented) =>
+    CryptographicOperations.FixedTimeEquals(
+        SHA256.HashData(Encoding.UTF8.GetBytes(expected)),
+        SHA256.HashData(Encoding.UTF8.GetBytes(presented)));
 
 static object View(Order order) => new
 {
