@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using MoynaPay.Application.AppAuth;
+using MoynaPay.Application.AppBootstrap;
 using MoynaPay.Api;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Abstractions;
@@ -40,6 +42,8 @@ builder.Services.AddScoped<OrderWorkflowRunner>();
 builder.Services.AddScoped<WorkflowActionHandlers>();
 builder.Services.AddScoped<AiProposalGate>();
 builder.Services.AddScoped<ReviewQueueService>();
+builder.Services.AddScoped<AppAuthService>();
+builder.Services.AddScoped<AppBootstrapService>();
 
 var app = builder.Build();
 
@@ -67,6 +71,65 @@ if (DependencyInjection.IsInMemory(app.Configuration))
 app.UseMiddleware<SignedRequestMiddleware>();
 
 app.MapGet("/v1/health", () => Results.Ok(new { status = "ok", service = "MoynaPay" }));
+
+// ---------------------------------------------------------------------------
+// Merchant app auth.
+// ---------------------------------------------------------------------------
+app.MapPost("/app/v1/auth/otp", async (
+    AppOtpRequest request, AppAuthService auth, CancellationToken ct) =>
+{
+    var result = await auth.RequestOtpAsync(request.Phone, ct).ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        RequestOtpOutcome.Sent => Results.Ok(new
+        {
+            sent = true,
+            expiresInSeconds = (int)AppAuthService.OtpTtl.TotalSeconds,
+            devOtp = app.Environment.IsDevelopment() ? result.DevOtp : null,
+        }),
+        RequestOtpOutcome.RateLimited => Results.Problem(
+            title: result.Reason, statusCode: StatusCodes.Status429TooManyRequests),
+        RequestOtpOutcome.NoMerchant => Results.NotFound(),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
+    };
+});
+
+app.MapPost("/app/v1/auth/token", async (
+    AppOtpVerifyRequest request, AppAuthService auth, CancellationToken ct) =>
+{
+    var result = await auth.VerifyOtpAsync(request.Phone, request.Otp, ct).ConfigureAwait(false);
+
+    return AppTokenResponse(result);
+});
+
+app.MapPost("/app/v1/auth/refresh", async (
+    AppRefreshRequest request, AppAuthService auth, CancellationToken ct) =>
+{
+    var result = await auth.RefreshAsync(request.RefreshToken, ct).ConfigureAwait(false);
+
+    return AppTokenResponse(result);
+});
+
+app.MapPost("/app/v1/auth/logout", async (
+    AppRefreshRequest request, AppAuthService auth, CancellationToken ct) =>
+{
+    await auth.LogoutAsync(request.RefreshToken, ct).ConfigureAwait(false);
+
+    return Results.NoContent();
+});
+
+app.MapGet("/app/v1/bootstrap", async (
+    HttpContext context, AppAuthService auth, AppBootstrapService bootstrap,
+    CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var result = await bootstrap.GetAsync(principal.MerchantId, ct).ConfigureAwait(false);
+
+    return result.Found ? Results.Ok(result.Bootstrap) : Results.Unauthorized();
+});
 
 // ---------------------------------------------------------------------------
 // Merchant onboarding and API keys.
@@ -501,6 +564,33 @@ static object WebhookTestView(WebhookTestResult result) => new
     body = result.Body,
 };
 
+static IResult AppTokenResponse(AppTokenResult result) =>
+    result.Outcome switch
+    {
+        AppTokenOutcome.Issued => Results.Ok(new
+        {
+            accessToken = result.AccessToken,
+            refreshToken = result.RefreshToken,
+            tokenType = "Bearer",
+            expiresInSeconds = (int)AppAuthService.AccessTtl.TotalSeconds,
+        }),
+        AppTokenOutcome.RateLimited => Results.Problem(
+            title: result.Reason, statusCode: StatusCodes.Status429TooManyRequests),
+        _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status401Unauthorized),
+    };
+
+static Task<AppPrincipal?> AppPrincipalAsync(HttpContext context, AppAuthService auth,
+    CancellationToken ct)
+{
+    var header = context.Request.Headers.Authorization.ToString();
+    const string bearer = "Bearer ";
+    var token = header.StartsWith(bearer, StringComparison.OrdinalIgnoreCase)
+        ? header[bearer.Length..].Trim()
+        : null;
+
+    return auth.ValidateAccessAsync(token, ct);
+}
+
 /// <summary>
 /// One merchant and one key, so the service can be driven the moment it starts.
 ///
@@ -571,3 +661,9 @@ public sealed record CreateMerchantRequest(
 public sealed record IssueApiKeyRequest(string? Label);
 
 public sealed record RegisterWebhookRequest(string? Url, bool? Active);
+
+public sealed record AppOtpRequest(string? Phone);
+
+public sealed record AppOtpVerifyRequest(string? Phone, string? Otp);
+
+public sealed record AppRefreshRequest(string? RefreshToken);

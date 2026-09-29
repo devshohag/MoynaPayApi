@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
@@ -24,6 +25,9 @@ public sealed class MemoryDatabase
     public ConcurrentDictionary<Guid, Subscription> Subscriptions { get; } = new();
     public ConcurrentDictionary<string, ApiCredential> Credentials { get; } = new(StringComparer.Ordinal);
     public ConcurrentDictionary<Guid, WebhookEndpoint> Webhooks { get; } = new();
+    public ConcurrentDictionary<Guid, AppOtpChallenge> AppOtps { get; } = new();
+    public ConcurrentDictionary<string, AppToken> AppTokens { get; } = new(StringComparer.Ordinal);
+    public ConcurrentDictionary<string, List<DateTimeOffset>> RateLimits { get; } = new(StringComparer.Ordinal);
 
     public ConcurrentDictionary<Guid, Order> Orders { get; } = new();
     public ConcurrentDictionary<Guid, Invoice> Invoices { get; } = new();
@@ -39,6 +43,14 @@ public sealed class MemoryMerchantStore(MemoryDatabase db) : IMerchantStore
 {
     public Task<Merchant?> FindAsync(Guid merchantId, CancellationToken ct = default) =>
         Task.FromResult(db.Merchants.TryGetValue(merchantId, out var m) && !m.IsDeleted ? m : null);
+
+    public Task<Merchant?> FindByMsisdnAsync(string msisdn, CancellationToken ct = default)
+    {
+        var merchant = db.Merchants.Values.FirstOrDefault(m =>
+            !m.IsDeleted && string.Equals(m.Msisdn, msisdn, StringComparison.Ordinal));
+
+        return Task.FromResult(merchant);
+    }
 
     public Task SaveMerchantAsync(Merchant merchant, Subscription subscription, CancellationToken ct = default)
     {
@@ -343,6 +355,17 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
         return Task.FromResult(page);
     }
 
+    public Task<IReadOnlyDictionary<OrderStatus, int>> CountByStatusAsync(Guid merchantId,
+        CancellationToken ct = default)
+    {
+        IReadOnlyDictionary<OrderStatus, int> counts = db.Orders.Values
+            .Where(o => o.TenantId == merchantId && !o.IsDeleted)
+            .GroupBy(o => o.Status)
+            .ToDictionary(g => g.Key, g => g.Count());
+
+        return Task.FromResult(counts);
+    }
+
     public Task<IReadOnlyList<OrderEvent>> TimelineAsync(Guid merchantId, Guid orderId,
         CancellationToken ct = default)
     {
@@ -377,6 +400,86 @@ public sealed class MemoryInvoiceStore(MemoryDatabase db) : IInvoiceStore
         db.Invoices[invoice.Id] = invoice;
 
         return Task.CompletedTask;
+    }
+}
+
+public sealed class MemoryAppAuthStore(MemoryDatabase db) : IAppAuthStore
+{
+    public Task SaveOtpAsync(AppOtpChallenge challenge, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(challenge);
+
+        db.AppOtps[challenge.Id] = challenge;
+
+        return Task.CompletedTask;
+    }
+
+    public Task<AppOtpChallenge?> LatestOtpAsync(string msisdn, CancellationToken ct = default)
+    {
+        var challenge = db.AppOtps.Values
+            .Where(o => string.Equals(o.Msisdn, msisdn, StringComparison.Ordinal))
+            .OrderByDescending(o => o.CreatedAt)
+            .FirstOrDefault();
+
+        return Task.FromResult(challenge);
+    }
+
+    public Task SaveTokenAsync(AppToken token, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(token);
+
+        db.AppTokens[Key(token.TokenHash, token.Kind)] = token;
+
+        return Task.CompletedTask;
+    }
+
+    public Task<AppToken?> FindTokenAsync(string tokenHash, AppTokenKind kind,
+        CancellationToken ct = default)
+    {
+        db.AppTokens.TryGetValue(Key(tokenHash, kind), out var token);
+
+        return Task.FromResult(token);
+    }
+
+    public Task RevokeTokenAsync(string tokenHash, AppTokenKind kind, DateTimeOffset now,
+        string? replacedByHash = null, CancellationToken ct = default)
+    {
+        lock (db.Gate)
+        {
+            if (db.AppTokens.TryGetValue(Key(tokenHash, kind), out var token)
+                && token.RevokedAt is null)
+            {
+                token.RevokedAt = now;
+                token.ReplacedByHash = replacedByHash;
+                db.AppTokens[Key(tokenHash, kind)] = token;
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private static string Key(string tokenHash, AppTokenKind kind) => $"{kind}:{tokenHash}";
+}
+
+public sealed class MemoryRateLimitStore(MemoryDatabase db) : IRateLimitStore
+{
+    public Task<bool> TryConsumeAsync(string key, DateTimeOffset now, TimeSpan window, int limit,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(key);
+        if (limit <= 0) return Task.FromResult(false);
+
+        lock (db.Gate)
+        {
+            var bucket = db.RateLimits.GetOrAdd(key, _ => []);
+            var cutoff = now.Subtract(window);
+            bucket.RemoveAll(stamp => stamp <= cutoff);
+
+            if (bucket.Count >= limit) return Task.FromResult(false);
+
+            bucket.Add(now);
+            return Task.FromResult(true);
+        }
     }
 }
 

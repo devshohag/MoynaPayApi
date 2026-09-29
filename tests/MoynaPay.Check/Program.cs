@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using MoynaPay.Application.AppAuth;
+using MoynaPay.Application.AppBootstrap;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Orders;
@@ -242,12 +244,200 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
     return (h.Db, new ReviewQueueService(orders, workflow, clock), workflow);
 }
 
+(MemoryDatabase Db, AppAuthService Auth, FixedClock Clock) AppAuthHarness(DateTimeOffset? at = null)
+{
+    var db = new MemoryDatabase();
+    db.Merchants[merchantId] = new Merchant
+    {
+        Id = merchantId,
+        TenantId = merchantId,
+        Name = "Test Store",
+        Msisdn = "8801711111111",
+        TimeZone = "Asia/Dhaka",
+    };
+    db.Subscriptions[merchantId] = new Subscription
+    {
+        TenantId = merchantId,
+        Calls = true,
+        Payments = true,
+        Courier = false,
+        Plan = "trial",
+    };
+
+    var clock = new FixedClock(at ?? now);
+    var auth = new AppAuthService(
+        new MemoryMerchantStore(db),
+        new MemoryAppAuthStore(db),
+        new MemoryRateLimitStore(db),
+        clock);
+
+    return (db, auth, clock);
+}
+
+(MemoryDatabase Db, AppAuthService Auth, AppBootstrapService Bootstrap) BootstrapHarness()
+{
+    var h = AppAuthHarness();
+    h.Db.Webhooks[merchantId] = new WebhookEndpoint
+    {
+        TenantId = merchantId,
+        Url = "https://shop.example.com/hook",
+        SecretCipher = "s",
+        KeyRingId = "dev",
+        Active = true,
+    };
+    h.Db.Credentials["mp_app_boot"] = new ApiCredential
+    {
+        TenantId = merchantId,
+        KeyId = "mp_app_boot",
+        SecretCipher = "s",
+        KeyRingId = "dev",
+        Label = "app bootstrap",
+    };
+
+    return (h.Db, h.Auth,
+        new AppBootstrapService(new MemoryMerchantStore(h.Db), new MemoryOrderStore(h.Db)));
+}
+
 CreateOrderCommand Cmd(string reference = "ORD-1", string msisdn = "01711223344", decimal amount = 1250m)
     => new()
     {
         MerchantId = merchantId, Reference = reference, Msisdn = msisdn,
         CustomerName = "সাদিয়া আক্তার", Amount = amount, Summary = "দুইটি শার্ট",
     };
+
+// ---------------------------------------------------------------------------
+// App auth
+// ---------------------------------------------------------------------------
+await CheckAsync("app login issues access and refresh tokens from an OTP", async () =>
+{
+    var h = AppAuthHarness();
+    var otp = await h.Auth.RequestOtpAsync("01711111111");
+    var token = await h.Auth.VerifyOtpAsync("01711111111", otp.DevOtp);
+    var principal = await h.Auth.ValidateAccessAsync(token.AccessToken);
+
+    return otp.Outcome == RequestOtpOutcome.Sent
+        && token.Outcome == AppTokenOutcome.Issued
+        && token.AccessToken is not null
+        && token.RefreshToken is not null
+        && principal?.MerchantId == merchantId
+        && h.Db.AppTokens.Values.Count(t => t.Kind == AppTokenKind.Refresh) == 1;
+});
+
+await CheckAsync("OTP brute force is limited", async () =>
+{
+    var h = AppAuthHarness();
+    await h.Auth.RequestOtpAsync("01711111111");
+
+    AppTokenResult last = null!;
+    for (var i = 0; i < 6; i++)
+    {
+        last = await h.Auth.VerifyOtpAsync("01711111111", "000000");
+    }
+
+    return last.Outcome == AppTokenOutcome.RateLimited;
+});
+
+await CheckAsync("OTP requests are rate limited", async () =>
+{
+    var h = AppAuthHarness();
+    var first = await h.Auth.RequestOtpAsync("01711111111");
+    await h.Auth.RequestOtpAsync("01711111111");
+    await h.Auth.RequestOtpAsync("01711111111");
+    var fourth = await h.Auth.RequestOtpAsync("01711111111");
+
+    return first.Outcome == RequestOtpOutcome.Sent
+        && fourth.Outcome == RequestOtpOutcome.RateLimited
+        && h.Db.AppOtps.Count == 3;
+});
+
+await CheckAsync("refresh rotation invalidates the old refresh token", async () =>
+{
+    var h = AppAuthHarness();
+    var otp = await h.Auth.RequestOtpAsync("01711111111");
+    var token = await h.Auth.VerifyOtpAsync("01711111111", otp.DevOtp);
+    var rotated = await h.Auth.RefreshAsync(token.RefreshToken);
+    var replay = await h.Auth.RefreshAsync(token.RefreshToken);
+    var secondUse = await h.Auth.RefreshAsync(rotated.RefreshToken);
+
+    return rotated.Outcome == AppTokenOutcome.Issued
+        && replay.Outcome == AppTokenOutcome.Invalid
+        && secondUse.Outcome == AppTokenOutcome.Issued
+        && h.Db.AppTokens.Values.Count(t => t.Kind == AppTokenKind.Refresh) == 3;
+});
+
+await CheckAsync("logout revokes the refresh token", async () =>
+{
+    var h = AppAuthHarness();
+    var otp = await h.Auth.RequestOtpAsync("01711111111");
+    var token = await h.Auth.VerifyOtpAsync("01711111111", otp.DevOtp);
+
+    await h.Auth.LogoutAsync(token.RefreshToken);
+    var afterLogout = await h.Auth.RefreshAsync(token.RefreshToken);
+
+    return afterLogout.Outcome == AppTokenOutcome.Invalid;
+});
+
+await CheckAsync("rate limit buckets reset after the window", async () =>
+{
+    var db = new MemoryDatabase();
+    var limits = new MemoryRateLimitStore(db);
+
+    var one = await limits.TryConsumeAsync("shop:k1", now, TimeSpan.FromMinutes(1), 2);
+    var two = await limits.TryConsumeAsync("shop:k1", now.AddSeconds(1), TimeSpan.FromMinutes(1), 2);
+    var blocked = await limits.TryConsumeAsync("shop:k1", now.AddSeconds(2), TimeSpan.FromMinutes(1), 2);
+    var reset = await limits.TryConsumeAsync("shop:k1", now.AddSeconds(61), TimeSpan.FromMinutes(1), 2);
+
+    return one && two && !blocked && reset;
+});
+
+await CheckAsync("app bootstrap returns merchant services settings and counters", async () =>
+{
+    var h = BootstrapHarness();
+    var otp = await h.Auth.RequestOtpAsync("01711111111");
+    var token = await h.Auth.VerifyOtpAsync("01711111111", otp.DevOtp);
+    var principal = await h.Auth.ValidateAccessAsync(token.AccessToken);
+
+    h.Db.Orders[Guid.CreateVersion7()] = new Order
+    {
+        TenantId = merchantId,
+        Reference = "BOOT-1",
+        CustomerName = "A",
+        Msisdn = "8801711111111",
+        Amount = 100,
+        Status = OrderStatus.NeedsHuman,
+    };
+    h.Db.Orders[Guid.CreateVersion7()] = new Order
+    {
+        TenantId = merchantId,
+        Reference = "BOOT-2",
+        CustomerName = "B",
+        Msisdn = "8801711111112",
+        Amount = 200,
+        Status = OrderStatus.AwaitingPayment,
+    };
+
+    var result = await h.Bootstrap.GetAsync(principal!.MerchantId);
+
+    return result.Found
+        && result.Bootstrap!.Merchant.Id == merchantId
+        && result.Bootstrap.EnabledServices.Calls
+        && result.Bootstrap.EnabledServices.Payments
+        && !result.Bootstrap.EnabledServices.Courier
+        && result.Bootstrap.Settings.WebhookConfigured
+        && result.Bootstrap.Settings.WebhookActive
+        && result.Bootstrap.Settings.ActiveApiKeys == 1
+        && result.Bootstrap.Counters.NeedsHuman == 1
+        && result.Bootstrap.Counters.AwaitingPayment == 1
+        && result.Bootstrap.Counters.Open == 2;
+});
+
+await CheckAsync("app bootstrap refuses an invalid access token", async () =>
+{
+    var h = BootstrapHarness();
+    var principal = await h.Auth.ValidateAccessAsync("not-a-real-token");
+
+    return principal is null;
+});
 
 await CheckAsync("an order is accepted and starts ringing", async () =>
 {

@@ -19,7 +19,7 @@ public sealed class SignedRequestMiddleware(RequestDelegate next, ILogger<Signed
 
     public async Task InvokeAsync(
         HttpContext context, IMerchantStore merchants, INonceStore nonces,
-        ISecretProtector protector, IClock clock)
+        ISecretProtector protector, IClock clock, IRateLimitStore rateLimits)
     {
         ArgumentNullException.ThrowIfNull(context);
 
@@ -76,6 +76,15 @@ public sealed class SignedRequestMiddleware(RequestDelegate next, ILogger<Signed
         if (!await nonces.TryUseAsync(keyId, nonce).ConfigureAwait(false))
         {
             await RefuseAsync(context, "nonce already used").ConfigureAwait(false);
+            return;
+        }
+
+        if (!await rateLimits.TryConsumeAsync(
+                $"shop:{credential.TenantId:N}:{keyId}", clock.UtcNow, TimeSpan.FromMinutes(1), 120)
+            .ConfigureAwait(false))
+        {
+            context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            await context.Response.WriteAsJsonAsync(new { error = "rate_limited" }).ConfigureAwait(false);
             return;
         }
 

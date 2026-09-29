@@ -50,6 +50,8 @@ public static class DependencyInjection
             services.AddSingleton<IInvoiceStore, MemoryInvoiceStore>();
             services.AddSingleton<IWorkflowSessionStore, MemoryWorkflowSessionStore>();
             services.AddSingleton<IWorkflowActionStore, MemoryWorkflowActionStore>();
+            services.AddSingleton<IAppAuthStore, MemoryAppAuthStore>();
+            services.AddSingleton<IRateLimitStore, MemoryRateLimitStore>();
             services.AddSingleton<INonceStore, MemoryNonceStore>();
             services.AddSingleton<ISecretProtector>(_ =>
                 AesGcmSecretProtector.FromConfiguration(configuration));

@@ -75,12 +75,20 @@ available queue, expired claims can be taken by another reviewer, and claim/rele
 events are audited. Review outcomes run through the workflow as a merchant/person action:
 confirm, reject, or call again; machine rejection from review remains refused.
 
-## Phase 12: App auth — OTP, token, refresh, logout, rate limit
-- /app/v1 login by phone OTP, access + refresh tokens, logout revokes refresh, rate limits on OTP and shop API.
-- Done when: brute force is limited, refresh rotation works, logout invalidates; checks added.
+## Phase 12: App auth — OTP, token, refresh, logout, rate limit [DONE]
+Done: `/app/v1/auth/otp`, `/app/v1/auth/token`, `/app/v1/auth/refresh`, and
+`/app/v1/auth/logout` are wired. OTP requests and verification attempts are rate limited,
+access/refresh tokens are opaque random values stored only as hashes, refresh rotates and
+revokes the old token, logout invalidates refresh, and signed shop API calls now pass
+through a per-key rate bucket after signature verification. Checks cover brute-force
+limits, refresh replay, logout invalidation, access validation, and bucket reset.
 
-## Phase 13: App bootstrap
-- One call returning what the app needs at start: merchant, enabled services, settings summary, counters.
+## Phase 13: App bootstrap [DONE]
+Done: `/app/v1/bootstrap` accepts the app bearer access token and returns the merchant
+profile, enabled subscription services, settings summary (time zone, webhook, active API
+key count), and current order status counters. The order store now has an exact
+CountByStatus port so the bootstrap payload does not depend on a paged list. Checks cover
+the bootstrap payload and invalid-token refusal.
 
 ## Phase 14: Home numbers
 - Today/7-day counts: new, confirmed, needs human, paid, shipped, failed calls; cheap queries with indexes.

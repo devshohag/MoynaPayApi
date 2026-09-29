@@ -50,6 +50,8 @@ public interface IMerchantStore
 {
     Task<Merchant?> FindAsync(Guid merchantId, CancellationToken ct = default);
 
+    Task<Merchant?> FindByMsisdnAsync(string msisdn, CancellationToken ct = default);
+
     Task SaveMerchantAsync(Merchant merchant, Subscription subscription, CancellationToken ct = default);
 
     Task<Subscription> SubscriptionAsync(Guid merchantId, CancellationToken ct = default);
@@ -79,6 +81,58 @@ public sealed record WebhookSendResult(bool Succeeded, int? StatusCode, string? 
 public interface IWebhookSender
 {
     Task<WebhookSendResult> SendAsync(WebhookEndpoint endpoint, string body, string signature,
+        CancellationToken ct = default);
+}
+
+public sealed class AppOtpChallenge
+{
+    public required Guid Id { get; init; }
+    public required Guid MerchantId { get; init; }
+    public required string Msisdn { get; init; }
+    public required string CodeHash { get; init; }
+    public int FailedAttempts { get; set; }
+    public required DateTimeOffset ExpiresAt { get; init; }
+    public DateTimeOffset? ConsumedAt { get; set; }
+    public required DateTimeOffset CreatedAt { get; init; }
+}
+
+public sealed class AppToken
+{
+    public required Guid Id { get; init; }
+    public required Guid MerchantId { get; init; }
+    public required string TokenHash { get; init; }
+    public required AppTokenKind Kind { get; init; }
+    public required DateTimeOffset ExpiresAt { get; init; }
+    public DateTimeOffset? RevokedAt { get; set; }
+    public string? ReplacedByHash { get; set; }
+    public required DateTimeOffset CreatedAt { get; init; }
+
+    public bool IsUsable(DateTimeOffset now) => RevokedAt is null && ExpiresAt > now;
+}
+
+public enum AppTokenKind
+{
+    Access,
+    Refresh,
+}
+
+public interface IAppAuthStore
+{
+    Task SaveOtpAsync(AppOtpChallenge challenge, CancellationToken ct = default);
+
+    Task<AppOtpChallenge?> LatestOtpAsync(string msisdn, CancellationToken ct = default);
+
+    Task SaveTokenAsync(AppToken token, CancellationToken ct = default);
+
+    Task<AppToken?> FindTokenAsync(string tokenHash, AppTokenKind kind, CancellationToken ct = default);
+
+    Task RevokeTokenAsync(string tokenHash, AppTokenKind kind, DateTimeOffset now,
+        string? replacedByHash = null, CancellationToken ct = default);
+}
+
+public interface IRateLimitStore
+{
+    Task<bool> TryConsumeAsync(string key, DateTimeOffset now, TimeSpan window, int limit,
         CancellationToken ct = default);
 }
 
@@ -171,6 +225,9 @@ public interface IOrderStore
         string reviewer, DateTimeOffset now, CancellationToken ct = default);
 
     Task<IReadOnlyList<Order>> ListAsync(Guid merchantId, OrderQuery query,
+        CancellationToken ct = default);
+
+    Task<IReadOnlyDictionary<OrderStatus, int>> CountByStatusAsync(Guid merchantId,
         CancellationToken ct = default);
 
     Task<IReadOnlyList<OrderEvent>> TimelineAsync(Guid merchantId, Guid orderId,
