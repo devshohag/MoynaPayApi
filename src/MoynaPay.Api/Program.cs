@@ -803,7 +803,7 @@ static IResult AppTokenResponse(AppTokenResult result) =>
         _ => Results.Problem(title: result.Reason, statusCode: StatusCodes.Status401Unauthorized),
     };
 
-static Task<AppPrincipal?> AppPrincipalAsync(HttpContext context, AppAuthService auth,
+static async Task<AppPrincipal?> AppPrincipalAsync(HttpContext context, AppAuthService auth,
     CancellationToken ct)
 {
     var header = context.Request.Headers.Authorization.ToString();
@@ -812,7 +812,19 @@ static Task<AppPrincipal?> AppPrincipalAsync(HttpContext context, AppAuthService
         ? header[bearer.Length..].Trim()
         : null;
 
-    return auth.ValidateAccessAsync(token, ct);
+    var principal = await auth.ValidateAccessAsync(token, ct).ConfigureAwait(false);
+
+    // The app has no signing middleware in front of it - the token is validated here, in
+    // the one place every /app/v1 route goes through - so this is where the database's
+    // query filter learns whose request it is. Without it the filter defends nothing on
+    // the app side, and every store method's merchantId parameter is the only thing
+    // standing between one merchant and another's orders.
+    if (principal is not null)
+    {
+        context.RequestServices.GetRequiredService<ITenantContext>().Set(principal.MerchantId);
+    }
+
+    return principal;
 }
 
 static bool TryParseStatus(string? status, out OrderStatus? parsed)

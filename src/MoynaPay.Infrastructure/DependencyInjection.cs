@@ -51,6 +51,13 @@ public static class DependencyInjection
         services.AddHttpClient<IWebhookSender, HttpWebhookSender>()
             .ConfigurePrimaryHttpMessageHandler(WebhookGuard.Handler);
 
+        // Above the branch, because the key ring has nothing to do with where the rows are
+        // kept. It sat inside the in-memory branch, which meant the Postgres branch
+        // returned before reaching it and the service would not start: every merchant
+        // secret has to be sealed and opened either way.
+        services.AddSingleton<ISecretProtector>(_ =>
+            AesGcmSecretProtector.FromConfiguration(configuration, isDevelopment));
+
         if (IsInMemory(configuration))
         {
             // Development only. The EF Core stores go on the other side of this branch in
@@ -66,21 +73,20 @@ public static class DependencyInjection
             services.AddSingleton<IAppAuthStore, MemoryAppAuthStore>();
             services.AddSingleton<IRateLimitStore, MemoryRateLimitStore>();
             services.AddSingleton<INonceStore, MemoryNonceStore>();
-            services.AddSingleton<ISecretProtector>(_ =>
-                AesGcmSecretProtector.FromConfiguration(configuration, isDevelopment));
 
             return services;
         }
 
-        // A1 maps the schema and generates the migration. The stores that read and write
-        // through it arrive in A2, so a connection string is not yet enough to run on.
-        // Refusing is the honest answer: starting and quietly serving from memory while a
-        // database sits there configured is how somebody spends an afternoon wondering why
-        // their tables are empty.
+#if USE_POSTGRES
+        // Same ports, same registrations, different rows. Nothing above this line knows
+        // which it got.
+        return Persistence.PersistenceSetup.AddPostgres(
+            services, configuration.GetConnectionString(ConnectionName)!);
+#else
         throw new InvalidOperationException(
-            "A Postgres connection string is configured, but the EF stores arrive in A2. " +
-            "The schema and migration exist - run `dotnet ef database update` to create " +
-            "the tables - but nothing reads them yet. Remove the connection string to run " +
-            "on the in-memory fallback.");
+            "A Postgres connection string is configured, but this build has no database in " +
+            "it. Set the UsePostgres environment variable to true and rebuild, or remove " +
+            "the connection string to run on the in-memory fallback.");
+#endif
     }
 }

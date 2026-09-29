@@ -1,5 +1,6 @@
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Security;
+using MoynaPay.Infrastructure;
 
 namespace MoynaPay.Api;
 
@@ -19,7 +20,8 @@ public sealed class SignedRequestMiddleware(RequestDelegate next, ILogger<Signed
 
     public async Task InvokeAsync(
         HttpContext context, IMerchantStore merchants, INonceStore nonces,
-        ISecretProtector protector, IClock clock, IRateLimitStore rateLimits)
+        ISecretProtector protector, IClock clock, IRateLimitStore rateLimits,
+        ITenantContext tenant)
     {
         ArgumentNullException.ThrowIfNull(context);
 
@@ -98,6 +100,11 @@ public sealed class SignedRequestMiddleware(RequestDelegate next, ILogger<Signed
 
         context.Items[MerchantItem] = credential.TenantId;
         context.Items[KeyItem] = keyId;
+
+        // The database's query filter reads this. Set once the request has been attributed
+        // and never again, so nothing further down the pipeline can widen what this request
+        // is allowed to see.
+        tenant.Set(credential.TenantId);
 
         await next(context).ConfigureAwait(false);
     }

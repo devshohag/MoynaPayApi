@@ -1,10 +1,41 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
+using Microsoft.Extensions.DependencyInjection;
+using MoynaPay.Application.Abstractions;
 
 namespace MoynaPay.Infrastructure.Persistence;
 
 public static class PersistenceSetup
 {
+    /// <summary>
+    /// The same ports the in-memory branch registers, served by Postgres.
+    ///
+    /// Scoped, not singleton. A DbContext is a unit of work with a change tracker; one
+    /// shared across the process would accumulate every entity the service has ever read
+    /// and answer later requests from that stale cache. The in-memory stores are singletons
+    /// for the opposite reason - the dictionary IS the database.
+    /// </summary>
+    public static IServiceCollection AddPostgres(
+        this IServiceCollection services, string connectionString)
+    {
+        ArgumentNullException.ThrowIfNull(services);
+
+        services.AddScoped<ITenantContext, TenantContext>();
+
+        services.AddDbContext<MoynaPayDbContext>(options => options.UseMoynaPay(connectionString));
+
+        services.AddScoped<IMerchantStore, EfMerchantStore>();
+        services.AddScoped<IOrderStore, EfOrderStore>();
+        services.AddScoped<IInvoiceStore, EfInvoiceStore>();
+        services.AddScoped<IAppAuthStore, EfAppAuthStore>();
+        services.AddScoped<IRateLimitStore, EfRateLimitStore>();
+        services.AddScoped<IWorkflowSessionStore, EfWorkflowSessionStore>();
+        services.AddScoped<IWorkflowActionStore, EfWorkflowActionStore>();
+        services.AddScoped<INonceStore, EfNonceStore>();
+
+        return services;
+    }
+
     /// <summary>
     /// One place where the provider is configured, used by the running service and by
     /// `dotnet ef` alike.
