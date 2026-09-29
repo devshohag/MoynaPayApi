@@ -2058,6 +2058,11 @@ await MoynaPay.Check.Hardening.RunAsync(Check, CheckAsync);
 await MoynaPay.Check.Outbox.RunAsync(Check, CheckAsync);
 
 // ---------------------------------------------------------------------------
+// Phase 19: the ARI event stream, and whose channel is whose
+// ---------------------------------------------------------------------------
+MoynaPay.Check.Telephony.Run(Check);
+
+// ---------------------------------------------------------------------------
 // Replay
 // ---------------------------------------------------------------------------
 await CheckAsync("a nonce cannot be used twice", async () =>

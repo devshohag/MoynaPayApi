@@ -60,6 +60,14 @@ public static class DependencyInjection
 
         services.AddScoped<MoynaPay.Application.Outbox.OutboxDispatcher>();
 
+        // Telephony. A singleton correlator because it IS the process's memory of which
+        // channel belongs to which call - one per scope would forget the call between the
+        // originate and the answer.
+        services.AddHttpClient("ari");
+        services.AddSingleton<Voice.AriClient>();
+        services.AddSingleton<Voice.AriEventStream>();
+        services.AddSingleton<Application.Voice.Ari.CallCorrelator>();
+
         if (IsInMemory(configuration))
         {
             // Development only. The EF Core stores go on the other side of this branch in

@@ -23,16 +23,79 @@ public sealed class AriClient
         _appName = configuration["Telephony:StasisAppName"] ?? "moynapay";
     }
 
-    public async Task<string?> OriginateAsync(Guid callSessionId, string fromNumber,
+    /// <summary>The channel variable that names the call, read back when a channel arrives
+    /// without a registration.</summary>
+    public const string SessionVariable = "MOYNAPAY_CALL_SESSION_ID";
+
+    /// <summary>
+    /// Places a call on a channel id WE choose.
+    ///
+    /// This is the outbound correlation fix, and it is two changes to one request.
+    ///
+    /// The channel id is supplied rather than read from the response. ARI accepts one on
+    /// POST /channels, and taking it means the id is known before Asterisk creates the
+    /// channel - so a StasisStart that arrives before the HTTP response comes back (which
+    /// happens on a busy trunk, and only on a busy trunk) is still recognised. Reading the
+    /// id from the response and correlating on it afterwards is a race that passes every
+    /// test on a quiet system.
+    ///
+    /// The variables go in the JSON body rather than the query string. Asterisk's own
+    /// documentation puts them there; the query-string form is accepted by some builds and
+    /// quietly ignored by others, and a variable that is quietly ignored is a fallback that
+    /// is not there on the day the first change is needed.
+    /// </summary>
+    public async Task OriginateAsync(Guid callSessionId, string channelId, string fromNumber,
         string toNumber, string trunkName, CancellationToken ct = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(channelId);
+
         var endpoint = $"PJSIP/{toNumber}@{trunkName}";
-        var query = $"endpoint={Escape(endpoint)}&app={Escape(_appName)}&callerId={Escape(fromNumber)}" +
-                    $"&variables[MOYNAPAY_CALL_SESSION_ID]={callSessionId}";
-        using var response = await SendWithRetryAsync(() => _httpClient.PostAsync($"channels?{query}", null, ct), ct);
+
+        var query = $"endpoint={Escape(endpoint)}&app={Escape(_appName)}" +
+                    $"&callerId={Escape(fromNumber)}&channelId={Escape(channelId)}";
+
+        var body = JsonSerializer.Serialize(new
+        {
+            variables = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [SessionVariable] = callSessionId.ToString(),
+            },
+        });
+
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+
+        using var response = await SendWithRetryAsync(
+            () => _httpClient.PostAsync($"channels?{query}", content, ct), ct);
+
         await EnsureSuccessAsync(response, ct);
-        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
-        return doc.RootElement.TryGetProperty("id", out var id) ? id.GetString() : null;
+    }
+
+    /// <summary>
+    /// Reads a channel variable. The fallback half of correlation: an Asterisk that ignored
+    /// the supplied channel id would otherwise leave a call nothing can steer, and a call
+    /// nothing can steer is a customer listening to silence.
+    /// </summary>
+    public async Task<string?> GetVariableAsync(string channelId, string variable,
+        CancellationToken ct = default)
+    {
+        using var response = await SendWithRetryAsync(() => _httpClient.GetAsync(
+            $"channels/{Escape(channelId)}/variable?variable={Escape(variable)}", ct), ct);
+
+        // A channel that has gone, or a variable that was never set. Neither is a fault:
+        // this is the path for a channel we may not own at all.
+        if (response.StatusCode is System.Net.HttpStatusCode.NotFound
+            or System.Net.HttpStatusCode.Conflict)
+        {
+            return null;
+        }
+
+        await EnsureSuccessAsync(response, ct);
+
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+
+        return document.RootElement.TryGetProperty("value", out var value)
+            ? value.GetString()
+            : null;
     }
 
     public async Task<HashSet<string>> ListChannelIdsAsync(CancellationToken ct = default)
