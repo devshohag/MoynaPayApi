@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.AppBootstrap;
 using MoynaPay.Application.AppHome;
+using MoynaPay.Application.AppOrders;
 using MoynaPay.Api;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Abstractions;
@@ -46,6 +47,7 @@ builder.Services.AddScoped<ReviewQueueService>();
 builder.Services.AddScoped<AppAuthService>();
 builder.Services.AddScoped<AppBootstrapService>();
 builder.Services.AddScoped<AppHomeService>();
+builder.Services.AddScoped<AppOrderService>();
 
 var app = builder.Build();
 
@@ -140,6 +142,55 @@ app.MapGet("/app/v1/home/numbers", async (
     if (principal is null) return Results.Unauthorized();
 
     return Results.Ok(await home.NumbersAsync(principal.MerchantId, ct).ConfigureAwait(false));
+});
+
+app.MapGet("/app/v1/orders", async (
+    HttpContext context, string? status, string? search, int? take,
+    DateTimeOffset? before, DateTimeOffset? from, DateTimeOffset? to,
+    AppAuthService auth, AppOrderService appOrders, CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    if (!TryParseStatus(status, out var parsedStatus))
+    {
+        return Results.Problem(title: "Invalid order status.", statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    return Results.Ok(await appOrders.ListAsync(principal.MerchantId, new AppOrderListQuery
+    {
+        Status = parsedStatus,
+        Search = search,
+        Take = take ?? 50,
+        Before = before,
+        From = from,
+        To = to,
+    }, ct).ConfigureAwait(false));
+});
+
+app.MapGet("/app/v1/orders/{reference}", async (
+    string reference, HttpContext context, AppAuthService auth, AppOrderService appOrders,
+    CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var order = await appOrders.DetailAsync(principal.MerchantId, reference, ct).ConfigureAwait(false);
+
+    return order is null ? Results.NotFound() : Results.Ok(order);
+});
+
+app.MapGet("/app/v1/orders/{reference}/timeline", async (
+    string reference, HttpContext context, AppAuthService auth, AppOrderService appOrders,
+    CancellationToken ct) =>
+{
+    var principal = await AppPrincipalAsync(context, auth, ct).ConfigureAwait(false);
+    if (principal is null) return Results.Unauthorized();
+
+    var order = await appOrders.DetailAsync(principal.MerchantId, reference, ct).ConfigureAwait(false);
+    if (order is null) return Results.NotFound();
+
+    return Results.Ok(await appOrders.TimelineAsync(principal.MerchantId, reference, ct).ConfigureAwait(false));
 });
 
 // ---------------------------------------------------------------------------
@@ -600,6 +651,20 @@ static Task<AppPrincipal?> AppPrincipalAsync(HttpContext context, AppAuthService
         : null;
 
     return auth.ValidateAccessAsync(token, ct);
+}
+
+static bool TryParseStatus(string? status, out OrderStatus? parsed)
+{
+    parsed = null;
+    if (string.IsNullOrWhiteSpace(status)) return true;
+
+    if (!Enum.TryParse<OrderStatus>(status.Trim(), ignoreCase: true, out var value))
+    {
+        return false;
+    }
+
+    parsed = value;
+    return true;
 }
 
 /// <summary>

@@ -336,6 +336,8 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
         else if (query.Status is { } status) rows = rows.Where(o => o.Status == status);
 
         if (query.Before is { } before) rows = rows.Where(o => o.CreatedAt < before);
+        if (query.From is { } from) rows = rows.Where(o => o.CreatedAt >= from);
+        if (query.To is { } to) rows = rows.Where(o => o.CreatedAt <= to);
 
         if (!string.IsNullOrWhiteSpace(query.Search))
         {

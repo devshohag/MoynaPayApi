@@ -97,8 +97,12 @@ Counts are read through a dedicated HomeMetrics order-store query over tenant + 
 + event type/status, which is the index-friendly shape for the database store. Checks
 cover today/7-day windows, failed calls, and tenant isolation.
 
-## Phase 15: Orders list, detail, timeline
-- Paged list with filters (status, date, search by phone/reference), detail, full event timeline.
+## Phase 15: Orders list, detail, timeline [DONE]
+Done: `/app/v1/orders` returns a paged app order list with status, date range, search,
+take, and before-cursor filters. `/app/v1/orders/{reference}` returns order detail, and
+`/app/v1/orders/{reference}/timeline` returns the full event timeline. All routes use
+the app bearer token and stay scoped to the merchant. Checks cover filters, paging,
+detail, timeline ordering, and tenant isolation.
 
 ## Phase 16: Order actions from the app
 - Decision (confirm/reject by merchant), recall (undo a machine "no"), claim for review, mark shipped.

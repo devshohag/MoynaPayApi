@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.AppBootstrap;
 using MoynaPay.Application.AppHome;
+using MoynaPay.Application.AppOrders;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Orders;
@@ -306,6 +307,34 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
     return (h.Db, h.Auth, new AppHomeService(new MemoryOrderStore(h.Db), h.Clock));
 }
 
+(MemoryDatabase Db, AppAuthService Auth, AppOrderService Orders) AppOrderHarness(DateTimeOffset? at = null)
+{
+    var h = AppAuthHarness(at);
+
+    return (h.Db, h.Auth, new AppOrderService(new MemoryOrderStore(h.Db)));
+}
+
+Order AddOrder(MemoryDatabase db, string reference, OrderStatus status, DateTimeOffset createdAt,
+    string customer = "Customer", string msisdn = "8801711111111", Guid? tenant = null)
+{
+    var order = new Order
+    {
+        Id = Guid.CreateVersion7(),
+        TenantId = tenant ?? merchantId,
+        Reference = reference,
+        CustomerName = customer,
+        Msisdn = msisdn,
+        Amount = 100,
+        Summary = "shirt",
+        Status = status,
+        CreatedAt = createdAt,
+        UpdatedAt = createdAt,
+    };
+    db.Orders[order.Id] = order;
+
+    return order;
+}
+
 void AddEvent(MemoryDatabase db, OrderStatus? to, string type, DateTimeOffset at, Guid? tenant = null)
 {
     var orderId = Guid.CreateVersion7();
@@ -516,6 +545,84 @@ await CheckAsync("home numbers stay inside one merchant", async () =>
     var numbers = await h.Home.NumbersAsync(merchantId);
 
     return numbers.Today.Confirmed == 1 && numbers.SevenDays.Confirmed == 1;
+});
+
+await CheckAsync("app order list filters by status date and search", async () =>
+{
+    var h = AppOrderHarness();
+    AddOrder(h.Db, "ORD-A", OrderStatus.Confirmed, now.AddDays(-1), customer: "Sadia");
+    AddOrder(h.Db, "ORD-B", OrderStatus.NeedsHuman, now.AddDays(-1), customer: "Sadia");
+    AddOrder(h.Db, "OLD-A", OrderStatus.Confirmed, now.AddDays(-20), customer: "Sadia");
+    AddOrder(h.Db, "ORD-C", OrderStatus.Confirmed, now.AddDays(-1), customer: "Karim");
+
+    var page = await h.Orders.ListAsync(merchantId, new AppOrderListQuery
+    {
+        Status = OrderStatus.Confirmed,
+        Search = "sadia",
+        From = now.AddDays(-7),
+        To = now,
+    });
+
+    return page.Items.Count == 1 && page.Items[0].Reference == "ORD-A";
+});
+
+await CheckAsync("app order list pages by before cursor", async () =>
+{
+    var h = AppOrderHarness();
+    AddOrder(h.Db, "ORD-1", OrderStatus.Confirmed, now.AddMinutes(-1));
+    AddOrder(h.Db, "ORD-2", OrderStatus.Confirmed, now.AddMinutes(-2));
+    AddOrder(h.Db, "ORD-3", OrderStatus.Confirmed, now.AddMinutes(-3));
+
+    var first = await h.Orders.ListAsync(merchantId, new AppOrderListQuery { Take = 2 });
+    var second = await h.Orders.ListAsync(merchantId, new AppOrderListQuery
+    {
+        Take = 2,
+        Before = first.NextBefore,
+    });
+
+    return first.Items.Select(i => i.Reference).SequenceEqual(["ORD-1", "ORD-2"])
+        && first.NextBefore == first.Items[^1].CreatedAt
+        && second.Items.Count == 1
+        && second.Items[0].Reference == "ORD-3"
+        && second.NextBefore is null;
+});
+
+await CheckAsync("app order detail and timeline stay inside merchant", async () =>
+{
+    var h = AppOrderHarness();
+    var mine = AddOrder(h.Db, "ORD-MINE", OrderStatus.NeedsHuman, now.AddMinutes(-1));
+    var otherMerchant = Guid.CreateVersion7();
+    AddOrder(h.Db, "ORD-OTHER", OrderStatus.Confirmed, now.AddMinutes(-1), tenant: otherMerchant);
+    h.Db.Events.Add(new OrderEvent
+    {
+        TenantId = merchantId,
+        OrderId = mine.Id,
+        Type = "order.received",
+        Actor = Actor.Shop,
+        To = OrderStatus.Calling,
+        At = now.AddMinutes(-1),
+    });
+    h.Db.Events.Add(new OrderEvent
+    {
+        TenantId = merchantId,
+        OrderId = mine.Id,
+        Type = "order.needs_human",
+        Actor = Actor.Machine,
+        From = OrderStatus.Calling,
+        To = OrderStatus.NeedsHuman,
+        Detail = "no answer",
+        At = now,
+    });
+
+    var detail = await h.Orders.DetailAsync(merchantId, "ORD-MINE");
+    var hidden = await h.Orders.DetailAsync(merchantId, "ORD-OTHER");
+    var timeline = await h.Orders.TimelineAsync(merchantId, "ORD-MINE");
+
+    return detail?.Reference == "ORD-MINE"
+        && hidden is null
+        && timeline.Count == 2
+        && timeline[0].Type == "order.received"
+        && timeline[1].Detail == "no answer";
 });
 
 await CheckAsync("an order is accepted and starts ringing", async () =>

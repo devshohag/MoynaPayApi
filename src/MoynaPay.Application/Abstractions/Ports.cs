@@ -269,6 +269,8 @@ public sealed record OrderQuery
     public string? Search { get; init; }
     public int Take { get; init; } = 50;
     public DateTimeOffset? Before { get; init; }
+    public DateTimeOffset? From { get; init; }
+    public DateTimeOffset? To { get; init; }
 }
 
 public enum ReviewClaimStoreOutcome
