@@ -11,6 +11,7 @@ using MoynaPay.Application.Orders;
 using MoynaPay.Application.Security;
 using MoynaPay.Application.Voice;
 using MoynaPay.Application.Voice.Ai;
+using MoynaPay.Application.Voice.Recording;
 using MoynaPay.Application.Voice.Speech;
 using MoynaPay.Application.Workflows;
 using MoynaPay.Domain.Merchants;
@@ -294,6 +295,41 @@ VoiceAiDecisionCommand VoiceDecision(Guid orderId, string transcript) => new()
         new HandoffContextService(orders, new DeterministicHandoffContextSummarizer(), clock),
         h.Reviews,
         h.Workflow);
+}
+
+(MemoryDatabase Db, CallRecordingService Recordings, FakeRecordingArchive Archive,
+    OrderWorkflowService Workflow) RecordingHarness(
+    DateTimeOffset? at = null,
+    bool calls = true,
+    bool pay = false,
+    bool courier = false,
+    bool webhook = true)
+{
+    var h = AiGateHarness(calls: calls, pay: pay, courier: courier, webhook: webhook);
+    var orders = new MemoryOrderStore(h.Db);
+    var clock = new FixedClock(at ?? now);
+    var archive = new FakeRecordingArchive();
+    var signer = new RecordingPlaybackUrlSigner("recording-test-secret");
+
+    return (h.Db, new CallRecordingService(orders, archive, signer, clock), archive, h.Workflow);
+}
+
+Dictionary<string, string> Query(string url)
+{
+    var question = url.IndexOf('?', StringComparison.Ordinal);
+    var pieces = question < 0 ? Array.Empty<string>() : url[(question + 1)..].Split('&');
+    var parsed = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    foreach (var piece in pieces)
+    {
+        var equals = piece.IndexOf('=', StringComparison.Ordinal);
+        if (equals <= 0) continue;
+
+        parsed[Uri.UnescapeDataString(piece[..equals])] =
+            Uri.UnescapeDataString(piece[(equals + 1)..]);
+    }
+
+    return parsed;
 }
 
 (MemoryDatabase Db, ReviewQueueService Reviews, OrderWorkflowService Workflow) ReviewHarness(
@@ -1549,6 +1585,81 @@ await CheckAsync("handoff context for a missing order is not recorded", async ()
         && h.Db.Events.All(e => e.Type != "voice.handoff_context");
 });
 
+Check("recording playback URLs expire and cannot be tampered", () =>
+{
+    var signer = new RecordingPlaybackUrlSigner("recording-test-secret");
+    var key = "recordings/m/order/session/call.wav";
+    var expiresAt = now.AddMinutes(15);
+    var url = signer.Sign(key, expiresAt);
+    var query = Query(url);
+    var expires = long.Parse(query["expires"], System.Globalization.CultureInfo.InvariantCulture);
+    var sig = query["sig"];
+
+    return signer.Verify(key, expires, sig, now.AddMinutes(14))
+        && !signer.Verify(key + ".other", expires, sig, now.AddMinutes(14))
+        && !signer.Verify(key, expires, sig, now.AddMinutes(16));
+});
+
+await CheckAsync("call recording is archived and written to the order timeline", async () =>
+{
+    var h = RecordingHarness();
+    var r = await h.Workflow.CreateAsync(Cmd());
+    var session = Guid.Parse("01929999-0000-7000-8000-000000000029");
+    var recordingName = CallRecordingService.RecordingName(session);
+
+    var result = await h.Recordings.StoreFinishedAsync(new RecordingFinishedCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        CallSessionId = session,
+        RecordingName = recordingName,
+    });
+
+    var eventRow = h.Db.Events.Single(e => e.Type == "voice.recording_stored");
+    return result.Outcome == RecordingStoreOutcome.Recorded
+        && result.ObjectStorageKey is not null
+        && result.ObjectStorageKey.Contains(session.ToString(), StringComparison.Ordinal)
+        && result.PlaybackUrl is not null
+        && result.PlaybackUrl.Contains("expires=", StringComparison.Ordinal)
+        && h.Archive.LastRecordingName == recordingName
+        && h.Archive.LastObjectStorageKey == result.ObjectStorageKey
+        && eventRow.OrderId == r.Order.Id
+        && eventRow.PayloadJson is not null
+        && eventRow.PayloadJson.Contains("playbackUrl", StringComparison.Ordinal)
+        && eventRow.PayloadJson.Contains("objectStorageKey", StringComparison.Ordinal);
+});
+
+await CheckAsync("recording storage for a missing order is ignored", async () =>
+{
+    var h = RecordingHarness();
+
+    var result = await h.Recordings.StoreFinishedAsync(new RecordingFinishedCommand
+    {
+        MerchantId = merchantId,
+        OrderId = Guid.CreateVersion7(),
+        CallSessionId = Guid.CreateVersion7(),
+        RecordingName = "missing-recording",
+    });
+
+    return result.Outcome == RecordingStoreOutcome.NotFound
+        && h.Archive.LastRecordingName is null
+        && h.Db.Events.All(e => e.Type != "voice.recording_stored");
+});
+
+Check("recording correlation survives channel release", () =>
+{
+    var calls = new MoynaPay.Application.Voice.Ari.CallCorrelator();
+    var session = Guid.CreateVersion7();
+    var name = CallRecordingService.RecordingName(session);
+    calls.Register(session, merchantId, Guid.CreateVersion7(), "shop", now);
+    calls.ExpectRecording(session, name);
+    calls.Release(session);
+
+    return calls.TryReleaseRecording(name, out var call)
+        && call.CallSessionId == session
+        && !calls.TryReleaseRecording(name, out _);
+});
+
 // ---------------------------------------------------------------------------
 // Review queue
 // ---------------------------------------------------------------------------
@@ -2723,6 +2834,24 @@ sealed class FakeConversationModel(string response) : IConversationModel
         ct.ThrowIfCancellationRequested();
         yield return new TextDelta(response);
         yield return new ModelCompleted("stop");
+    }
+}
+
+sealed class FakeRecordingArchive : IRecordingArchive
+{
+    public string? LastRecordingName { get; private set; }
+
+    public string? LastObjectStorageKey { get; private set; }
+
+    public Task<RecordingArchiveResult> ArchiveAsync(
+        string asteriskRecordingName,
+        string objectStorageKey,
+        CancellationToken ct = default)
+    {
+        LastRecordingName = asteriskRecordingName;
+        LastObjectStorageKey = objectStorageKey;
+
+        return Task.FromResult(new RecordingArchiveResult(objectStorageKey, 12_345, 42));
     }
 }
 

@@ -2,6 +2,7 @@ using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Orders;
 using MoynaPay.Application.Voice;
 using MoynaPay.Application.Voice.Ari;
+using MoynaPay.Application.Voice.Recording;
 using MoynaPay.Application.Workflows;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
@@ -409,8 +410,10 @@ internal sealed class VoiceWorker(
 
                 break;
 
-            // Phases 26 to 29 attach here.
             case AriEvent.RecordingFinished:
+                StoreRecordingInBackground(evt.RecordingName);
+                break;
+
             default:
                 break;
         }
@@ -482,10 +485,72 @@ internal sealed class VoiceWorker(
             return;
         }
 
+        await StartRecordingAsync(channelId, call, ct).ConfigureAwait(false);
+
         var flow = new CallFlow(Script, order, call.ShopName);
         _flows[channelId] = flow;
 
         await ActAsync(channelId, flow.Begin(), ct).ConfigureAwait(false);
+    }
+
+    private async Task StartRecordingAsync(string channelId, OutboundCall call, CancellationToken ct)
+    {
+        var recordingName = CallRecordingService.RecordingName(call.CallSessionId);
+        calls.ExpectRecording(call.CallSessionId, recordingName);
+
+        try
+        {
+            await ari.StartRecordingAsync(
+                channelId,
+                recordingName,
+                maxDurationSeconds: 900,
+                maxSilenceSeconds: 60,
+                ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            calls.TryReleaseRecording(recordingName, out _);
+
+            log.LogWarning(ex,
+                "Call {CallSessionId} for order {OrderId} could not start recording",
+                call.CallSessionId,
+                call.OrderId);
+        }
+    }
+
+    private void StoreRecordingInBackground(string? recordingName)
+    {
+        if (!calls.TryReleaseRecording(recordingName, out var call))
+        {
+            log.LogInformation(
+                "Recording {RecordingName} finished, but it does not belong to a live MoynaPay call",
+                recordingName);
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await using var scope = scopes.CreateAsyncScope();
+                var recordings = scope.ServiceProvider.GetRequiredService<CallRecordingService>();
+
+                await recordings.StoreFinishedAsync(new RecordingFinishedCommand
+                {
+                    MerchantId = call.MerchantId,
+                    OrderId = call.OrderId,
+                    CallSessionId = call.CallSessionId,
+                    RecordingName = recordingName!,
+                }, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                log.LogError(ex,
+                    "Recording {RecordingName} for call {CallSessionId} could not be stored",
+                    recordingName,
+                    call.CallSessionId);
+            }
+        }, CancellationToken.None);
     }
 
     /// <summary>

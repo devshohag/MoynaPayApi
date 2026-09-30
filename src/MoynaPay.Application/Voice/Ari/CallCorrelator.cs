@@ -41,6 +41,9 @@ public sealed class CallCorrelator
     private readonly ConcurrentDictionary<string, PendingMedia> _mediaByTransport =
         new(StringComparer.Ordinal);
 
+    private readonly ConcurrentDictionary<string, OutboundCall> _byRecording =
+        new(StringComparer.Ordinal);
+
     /// <summary>Channels we have placed and not yet finished with.</summary>
     public int Count => _byChannel.Count;
 
@@ -127,6 +130,26 @@ public sealed class CallCorrelator
 
         _mediaByTransport.TryRemove(transportId, out _);
         return null;
+    }
+
+    public void ExpectRecording(Guid callSessionId, string recordingName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(recordingName);
+
+        if (!_bySession.TryGetValue(callSessionId, out var call))
+        {
+            throw new InvalidOperationException($"Call session '{callSessionId}' is not registered.");
+        }
+
+        _byRecording[recordingName] = call;
+    }
+
+    public bool TryReleaseRecording(string? recordingName, out OutboundCall call)
+    {
+        call = null!;
+
+        return !string.IsNullOrWhiteSpace(recordingName)
+            && _byRecording.TryRemove(recordingName, out call!);
     }
 
     /// <summary>
