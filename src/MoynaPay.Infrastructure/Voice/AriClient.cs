@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Configuration;
+using MoynaPay.Application.Voice.Ari;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -143,6 +144,42 @@ public sealed class AriClient
         using var response = await SendWithRetryAsync(() => _httpClient.PostAsync(
             $"channels/{Escape(channelId)}/record?{query}", null, ct), ct);
         await EnsureSuccessAsync(response, ct);
+    }
+
+    public async Task<string> StartExternalMediaAsync(
+        Guid callSessionId,
+        string channelId,
+        ExternalMediaOptions options,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(channelId);
+        ArgumentNullException.ThrowIfNull(options);
+
+        var externalChannelId = $"media-{callSessionId:N}";
+        var query =
+            $"app={Escape(_appName)}" +
+            $"&channelId={Escape(externalChannelId)}" +
+            $"&external_host={Escape(options.ExternalHost)}" +
+            $"&format={Escape(options.Format)}" +
+            $"&encapsulation={Escape(options.Encapsulation)}" +
+            $"&transport={Escape(options.Transport)}" +
+            $"&connection_type={Escape(options.ConnectionType)}";
+
+        var body = JsonSerializer.Serialize(new
+        {
+            variables = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [SessionVariable] = callSessionId.ToString(),
+                ["MOYNAPAY_CONTROL_CHANNEL_ID"] = channelId,
+            },
+        });
+
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+        using var response = await SendWithRetryAsync(
+            () => _httpClient.PostAsync($"channels/externalMedia?{query}", content, ct), ct);
+
+        await EnsureSuccessAsync(response, ct);
+        return externalChannelId;
     }
 
     public async Task HangupAsync(string channelId, CancellationToken ct = default)

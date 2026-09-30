@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Net;
 using Microsoft.Extensions.Configuration;
 using MoynaPay.Application.Voice.Media;
+using MoynaPay.Application.Voice.Media.AudioSocket;
 using MoynaPay.Application.Voice.Speech;
 using MoynaPay.Application.Voice;
 using MoynaPay.Application.Voice.Ari;
@@ -31,6 +32,7 @@ internal static class Telephony
         Keypresses(check);
         Conversation(check);
         Speech(check);
+        ListeningPath(check);
     }
 
     // -----------------------------------------------------------------------
@@ -435,6 +437,277 @@ internal static class Telephony
         });
 
         static IConfiguration EmptyConfiguration() => new ConfigurationBuilder().Build();
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 26: AudioSocket listening path
+    // -----------------------------------------------------------------------
+    private static void ListeningPath(Action<string, Func<bool>> check)
+    {
+        static byte[] Tone(int samples)
+        {
+            var payload = new byte[samples * 2];
+            for (var i = 0; i < samples; i++)
+            {
+                BinaryPrimitives.WriteInt16LittleEndian(payload.AsSpan(i * 2), (short)(i % short.MaxValue));
+            }
+
+            return payload;
+        }
+
+        static async Task WriteAsync(System.Net.Sockets.NetworkStream stream, byte type, byte[] payload)
+        {
+            await stream.WriteAsync(AudioSocketProtocol.BuildMessage(type, payload));
+            await stream.FlushAsync();
+        }
+
+        static async Task<AudioFrame?> ReadOneAsync(IAudioTransport transport)
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            await foreach (var frame in transport.ReceiveAsync(cts.Token))
+            {
+                return frame;
+            }
+
+            return null;
+        }
+
+        static async Task<AudioSocketTransport?> AcceptOneAsync(
+            AudioSocketListener listener, CancellationToken ct)
+        {
+            await foreach (var transport in listener.AcceptAsync(ct))
+            {
+                return transport;
+            }
+
+            return null;
+        }
+
+        check("audiosocket header is type then big-endian length", () =>
+        {
+            var header = new byte[3];
+            AudioSocketProtocol.WriteHeader(header, AudioSocketProtocol.TypeAudio, 320);
+
+            return header[0] == 0x10 && header[1] == 0x01 && header[2] == 0x40;
+        });
+
+        check("audiosocket header round trips", () =>
+        {
+            var header = new byte[3];
+            AudioSocketProtocol.WriteHeader(header, AudioSocketProtocol.TypeUuid, 16);
+            var (type, length) = AudioSocketProtocol.ReadHeader(header);
+
+            return type == AudioSocketProtocol.TypeUuid && length == 16;
+        });
+
+        check("audiosocket rejects oversized payloads rather than truncating", () =>
+        {
+            try
+            {
+                AudioSocketProtocol.WriteHeader(
+                    new byte[3],
+                    AudioSocketProtocol.TypeAudio,
+                    AudioSocketProtocol.MaxPayloadLength + 1);
+                return false;
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return true;
+            }
+        });
+
+        check("audiosocket twenty millisecond frame is 320 bytes", () =>
+            AudioSocketProtocol.FramePayloadLength == 320
+            && AudioFormat.Telephony8k.BytesPerFrame(AudioSocketProtocol.FrameDuration) == 320);
+
+        check("audiosocket listener accepts UUID handshake and receives audio", () =>
+        {
+            return Run().GetAwaiter().GetResult();
+
+            static async Task<bool> Run()
+            {
+                var session = Guid.CreateVersion7();
+                await using var listener = new AudioSocketListener(new AudioSocketOptions
+                {
+                    Address = IPAddress.Loopback,
+                    Port = 0,
+                    HandshakeTimeout = TimeSpan.FromSeconds(2),
+                });
+                listener.Start();
+
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                var accepted = AcceptOneAsync(listener, cts.Token);
+
+                using var client = new System.Net.Sockets.TcpClient();
+                await client.ConnectAsync(IPAddress.Loopback, listener.Port, cts.Token);
+                var stream = client.GetStream();
+                await WriteAsync(stream, AudioSocketProtocol.TypeUuid, session.ToByteArray());
+
+                await using var transport = await accepted;
+                if (transport is null || transport.TransportId != session.ToString("D")) return false;
+
+                var payload = Tone(160);
+                await WriteAsync(stream, AudioSocketProtocol.TypeAudio, payload);
+                var frame = await ReadOneAsync(transport);
+
+                return frame is { Format: var format }
+                    && format == AudioFormat.Telephony8k
+                    && frame.Value.Payload.Span.SequenceEqual(payload);
+            }
+        });
+
+        check("unexpected audiosocket connection is dropped", () =>
+        {
+            return Run().GetAwaiter().GetResult();
+
+            static async Task<bool> Run()
+            {
+                await using var listener = new AudioSocketListener(new AudioSocketOptions
+                {
+                    Address = IPAddress.Loopback,
+                    Port = 0,
+                    HandshakeTimeout = TimeSpan.FromMilliseconds(150),
+                });
+                listener.Start();
+
+                using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(350));
+                var accepted = AcceptOneAsync(listener, cts.Token);
+
+                using var client = new System.Net.Sockets.TcpClient();
+                await client.ConnectAsync(IPAddress.Loopback, listener.Port, CancellationToken.None);
+                await WriteAsync(client.GetStream(), AudioSocketProtocol.TypeAudio, Tone(160));
+
+                return await accepted is null;
+            }
+        });
+
+        check("corrupt audiosocket audio frame costs one frame, not the call", () =>
+        {
+            return Run().GetAwaiter().GetResult();
+
+            static async Task<bool> Run()
+            {
+                var session = Guid.CreateVersion7();
+                await using var listener = new AudioSocketListener(new AudioSocketOptions
+                {
+                    Address = IPAddress.Loopback,
+                    Port = 0,
+                    HandshakeTimeout = TimeSpan.FromSeconds(2),
+                });
+                listener.Start();
+
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                var accepted = AcceptOneAsync(listener, cts.Token);
+
+                using var client = new System.Net.Sockets.TcpClient();
+                await client.ConnectAsync(IPAddress.Loopback, listener.Port, cts.Token);
+                var stream = client.GetStream();
+                await WriteAsync(stream, AudioSocketProtocol.TypeUuid, session.ToByteArray());
+
+                await using var transport = await accepted;
+                if (transport is null) return false;
+
+                await WriteAsync(stream, AudioSocketProtocol.TypeAudio, [1, 2]);
+                var good = Tone(160);
+                await WriteAsync(stream, AudioSocketProtocol.TypeAudio, good);
+
+                var frame = await ReadOneAsync(transport);
+                return frame is not null && frame.Value.Payload.Span.SequenceEqual(good);
+            }
+        });
+
+        check("media session converts inbound audio for the recognizer", () =>
+        {
+            return Run().GetAwaiter().GetResult();
+
+            static async Task<bool> Run()
+            {
+                var transport = new FakeAudioTransport(Tone(160), AudioFormat.Telephony8k);
+                await using var session = new MediaSession(transport, new MediaSessionOptions
+                {
+                    InputFormat = AudioFormat.Wide16k,
+                });
+
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await foreach (var frame in session.ReceiveAsync(cts.Token))
+                {
+                    return frame.Format == AudioFormat.Wide16k
+                        && frame.Payload.Length == 640
+                        && session.Diagnostics.ResampleOperations == 1;
+                }
+
+                return false;
+            }
+        });
+
+        check("ARI externalMedia request carries audiosocket options and call variable", () =>
+        {
+            var handler = new RecordingHandler(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}"),
+            });
+            var factory = new SingleClientFactory(new HttpClient(handler));
+            var config = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Telephony:AriBaseUrl"] = "http://asterisk.local/ari",
+                    ["Telephony:AriUsername"] = "u",
+                    ["Telephony:AriPassword"] = "p",
+                    ["Telephony:StasisAppName"] = "moynapay",
+                })
+                .Build();
+            var ari = new AriClient(factory, config);
+            var session = Guid.Parse("01929999-0000-7000-8000-000000000026");
+
+            var id = ari.StartExternalMediaAsync(session, "control-1", new ExternalMediaOptions
+            {
+                ExternalHost = "host.docker.internal:9092",
+            }).GetAwaiter().GetResult();
+
+            var uri = handler.RequestUri?.AbsoluteUri ?? "";
+            return id == "media-01929999000070008000000000000026"
+                && uri.StartsWith("http://asterisk.local/ari/channels/externalMedia?", StringComparison.Ordinal)
+                && uri.Contains("external_host=host.docker.internal%3A9092", StringComparison.Ordinal)
+                && uri.Contains("encapsulation=audiosocket", StringComparison.Ordinal)
+                && uri.Contains("transport=tcp", StringComparison.Ordinal)
+                && handler.Body is not null
+                && handler.Body.Contains(session.ToString(), StringComparison.Ordinal)
+                && handler.Body.Contains("control-1", StringComparison.Ordinal);
+        });
+
+        check("call correlator attaches expected audio socket to the call", () =>
+        {
+            var calls = new CallCorrelator();
+            var session = Guid.CreateVersion7();
+            var channel = calls.Register(session, Guid.CreateVersion7(), Guid.CreateVersion7(), "shop", DateTimeOffset.UtcNow);
+            var transportId = calls.ExpectMedia(session);
+            var transport = new FakeAudioTransport(Tone(160), AudioFormat.Telephony8k, transportId);
+
+            return channel.StartsWith("moynapay-", StringComparison.Ordinal)
+                && calls.TryAttachMedia(transport, out var call)
+                && call.CallSessionId == session;
+        });
+
+        check("call correlator rejects unexpected audio sockets", () =>
+        {
+            var calls = new CallCorrelator();
+            var transport = new FakeAudioTransport(Tone(160), AudioFormat.Telephony8k, Guid.CreateVersion7().ToString("D"));
+
+            return !calls.TryAttachMedia(transport, out _);
+        });
+
+        check("media channel that never connects times out", () =>
+        {
+            var calls = new CallCorrelator();
+            var session = Guid.CreateVersion7();
+            calls.Register(session, Guid.CreateVersion7(), Guid.CreateVersion7(), "shop", DateTimeOffset.UtcNow);
+            calls.ExpectMedia(session);
+
+            var media = calls.WaitForMediaAsync(session, TimeSpan.FromMilliseconds(20))
+                .GetAwaiter().GetResult();
+
+            return media is null;
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -1090,5 +1363,36 @@ internal static class Telephony
 
             return response;
         }
+    }
+
+    private sealed class SingleClientFactory(HttpClient client) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => client;
+    }
+
+    private sealed class FakeAudioTransport(
+        byte[] payload,
+        AudioFormat format,
+        string transportId = "fake") : IAudioTransport
+    {
+        public string TransportId => transportId;
+
+        public AudioFormat Format => format;
+
+        public async IAsyncEnumerable<AudioFrame> ReceiveAsync(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+            yield return new AudioFrame(payload, format, 1, DateTimeOffset.UtcNow);
+        }
+
+        public ValueTask SendAsync(AudioFrame frame, CancellationToken ct) => ValueTask.CompletedTask;
+
+        public ValueTask FlushOutputAsync(CancellationToken ct) => ValueTask.CompletedTask;
+
+        public ValueTask TerminateAsync(CancellationToken ct) => ValueTask.CompletedTask;
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

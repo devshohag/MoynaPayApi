@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using MoynaPay.Application.Voice.Media;
 
 namespace MoynaPay.Application.Voice.Ari;
 
@@ -37,6 +38,9 @@ public sealed class CallCorrelator
 
     private readonly ConcurrentDictionary<Guid, OutboundCall> _bySession = new();
 
+    private readonly ConcurrentDictionary<string, PendingMedia> _mediaByTransport =
+        new(StringComparer.Ordinal);
+
     /// <summary>Channels we have placed and not yet finished with.</summary>
     public int Count => _byChannel.Count;
 
@@ -74,6 +78,56 @@ public sealed class CallCorrelator
 
     public bool TryGetBySession(Guid callSessionId, out OutboundCall call) =>
         _bySession.TryGetValue(callSessionId, out call!);
+
+    public string ExpectMedia(Guid callSessionId)
+    {
+        if (!_bySession.TryGetValue(callSessionId, out var call))
+        {
+            throw new InvalidOperationException($"Call session '{callSessionId}' is not registered.");
+        }
+
+        var transportId = callSessionId.ToString("D");
+        _mediaByTransport[transportId] = new PendingMedia(call);
+
+        return transportId;
+    }
+
+    public bool TryAttachMedia(IAudioTransport transport, out OutboundCall call)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+        call = null!;
+
+        if (!_mediaByTransport.TryRemove(transport.TransportId, out var pending))
+            return false;
+
+        call = pending.Call;
+        pending.Attached.TrySetResult(transport);
+
+        return true;
+    }
+
+    public async Task<IAudioTransport?> WaitForMediaAsync(
+        Guid callSessionId,
+        TimeSpan timeout,
+        CancellationToken ct = default)
+    {
+        var transportId = callSessionId.ToString("D");
+        if (!_mediaByTransport.TryGetValue(transportId, out var pending))
+            return null;
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var delay = Task.Delay(timeout, timeoutCts.Token);
+        var completed = await Task.WhenAny(pending.Attached.Task, delay).ConfigureAwait(false);
+
+        if (completed == pending.Attached.Task)
+        {
+            await timeoutCts.CancelAsync().ConfigureAwait(false);
+            return await pending.Attached.Task.ConfigureAwait(false);
+        }
+
+        _mediaByTransport.TryRemove(transportId, out _);
+        return null;
+    }
 
     /// <summary>
     /// Attaches a channel that arrived without a registration - the fallback path, where the
@@ -134,5 +188,11 @@ public sealed class CallCorrelator
         }
 
         return dropped;
+    }
+
+    private sealed record PendingMedia(OutboundCall Call)
+    {
+        public TaskCompletionSource<IAudioTransport> Attached { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
