@@ -92,7 +92,7 @@ public sealed class EfOrderStore(MoynaPayDbContext db) : IOrderStore
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"""
              UPDATE orders.orders o
-             SET status = {calling}, call_attempts = o.call_attempts + 1,
+             SET status = {calling},
                  claimed_by = {claimedBy}, claimed_until = {leaseUntil},
                  updated_at = {now}, row_version = o.row_version + 1
              WHERE o.id IN (

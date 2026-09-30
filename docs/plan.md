@@ -224,7 +224,8 @@ lease, respects the existing 09:00-21:00 Dhaka calling window even on a UTC serv
 registers the channel correlation before ARI originate, and lets expired claims be taken
 by another worker. Checks cover outside-hours refusal, two diallers not taking the same
 order, lease expiry after a dead dialler, and Confirmed/Rejected orders never being
-dialled.
+dialled. Attempt counting is deliberately left for phase 24, so a claim or crashed
+originate does not spend an attempt before retry policy exists.
 
 ## Phase 24: Retry policy + attempt accounting [PARTIAL]
 Existing: RedialPolicy in CallRules.cs.

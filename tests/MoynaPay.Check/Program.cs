@@ -2003,7 +2003,7 @@ await CheckAsync("two diallers never claim the same order", async () =>
 
     return first.Single().Order.Id == order.Id
         && second.Count == 0
-        && db.Orders[order.Id].CallAttempts == 1
+        && db.Orders[order.Id].CallAttempts == 0
         && db.Orders[order.Id].ClaimedBy == "dial-a";
 });
 
@@ -2017,7 +2017,7 @@ await CheckAsync("a dead dialler's call claim expires", async () =>
     var reclaimed = await store.ClaimDueCallsAsync("dial-b", 10, now.AddMinutes(2), now.AddMinutes(7));
 
     return reclaimed.Single().Order.Id == order.Id
-        && db.Orders[order.Id].CallAttempts == 2
+        && db.Orders[order.Id].CallAttempts == 0
         && db.Orders[order.Id].ClaimedBy == "dial-b";
 });
 
@@ -2034,7 +2034,7 @@ await CheckAsync("confirmed and rejected orders are never dialled", async () =>
     return claimed.Count == 1 && claimed[0].Order.Id == due.Id;
 });
 
-await CheckAsync("a received order claimed for calling records one attempt", async () =>
+await CheckAsync("a received order claimed for calling does not count as an attempt yet", async () =>
 {
     var db = DiallerDb();
     var order = AddOrder(db, "CALL-4", OrderStatus.Received, now);
@@ -2046,7 +2046,7 @@ await CheckAsync("a received order claimed for calling records one attempt", asy
 
     return claimed.Single().Order.Id == order.Id
         && current.Status == OrderStatus.Calling
-        && current.CallAttempts == 1
+        && current.CallAttempts == 0
         && callEvent.From == OrderStatus.Received
         && callEvent.To == OrderStatus.Calling;
 });

@@ -280,7 +280,6 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
                 var from = order.Status;
 
                 order.Status = OrderStatus.Calling;
-                order.CallAttempts++;
                 order.ClaimedBy = claimedBy;
                 order.ClaimedUntil = leaseUntil;
                 order.UpdatedAt = now;
