@@ -1,7 +1,12 @@
 using MoynaPay.Application.Abstractions;
+using MoynaPay.Application.Orders;
 using MoynaPay.Application.Voice;
 using MoynaPay.Application.Voice.Ari;
+using MoynaPay.Application.Workflows;
+using MoynaPay.Domain.Merchants;
+using MoynaPay.Domain.Orders;
 using MoynaPay.Infrastructure;
+using MoynaPay.Infrastructure.Memory;
 using MoynaPay.Infrastructure.Voice;
 using System.Collections.Concurrent;
 
@@ -13,6 +18,9 @@ using System.Collections.Concurrent;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddMoynaPay(builder.Configuration, builder.Environment.IsDevelopment());
+builder.Services.AddScoped<CreateOrderService>();
+builder.Services.AddScoped<OrderTransitionService>();
+builder.Services.AddScoped<OrderWorkflowService>();
 builder.Services.AddSingleton<VoiceHealth>();
 builder.Services.AddHostedService<VoiceWorker>();
 
@@ -21,6 +29,122 @@ var app = builder.Build();
 if (DependencyInjection.IsInMemory(app.Configuration))
 {
     app.Logger.LogWarning("In-memory stores. Nothing here survives a restart. Development only.");
+}
+
+if (app.Environment.IsDevelopment())
+{
+    app.MapPost("/dev/calls/softphone", async (
+        DevSoftphoneCallRequest? request,
+        MemoryDatabase db,
+        AriClient ari,
+        CallCorrelator calls,
+        IClock clock,
+        IConfiguration configuration,
+        CancellationToken ct) =>
+    {
+        var merchantId = Guid.Parse("01929999-0000-7000-8000-000000000001");
+        var now = clock.UtcNow;
+
+        db.Merchants[merchantId] = new Merchant
+        {
+            Id = merchantId,
+            TenantId = merchantId,
+            Name = request?.ShopName ?? "Demo Store",
+            Msisdn = "8801711111111",
+            Status = MerchantStatus.Trial,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+
+        db.Subscriptions[merchantId] = new Subscription
+        {
+            TenantId = merchantId,
+            Calls = true,
+            Payments = false,
+            Courier = false,
+            Plan = "local",
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+
+        var reference = request?.Reference ?? $"LOCAL-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+        var order = new Order
+        {
+            TenantId = merchantId,
+            Reference = reference,
+            CustomerName = request?.CustomerName ?? "Local Caller",
+            Msisdn = "8801711223344",
+            Amount = request?.Amount ?? 1250m,
+            Summary = request?.Summary ?? "test order",
+            Status = OrderStatus.Calling,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+
+        db.Orders[order.Id] = order;
+        db.Events.Add(new OrderEvent
+        {
+            TenantId = merchantId,
+            OrderId = order.Id,
+            Type = "order.received",
+            Actor = Actor.Shop,
+            To = OrderStatus.Calling,
+            At = now,
+        });
+
+        var session = Guid.CreateVersion7();
+        var channelId = calls.Register(
+            session,
+            merchantId,
+            order.Id,
+            request?.ShopName ?? "Demo Store",
+            now);
+
+        var endpoint = request?.Endpoint
+            ?? configuration["Telephony:DevSoftphoneEndpoint"]
+            ?? "PJSIP/1001";
+
+        await ari.OriginateEndpointAsync(
+            session,
+            channelId,
+            request?.FromNumber ?? "09610000000",
+            endpoint,
+            ct).ConfigureAwait(false);
+
+        return Results.Accepted($"/dev/orders/{reference}", new
+        {
+            reference,
+            orderId = order.Id,
+            callSessionId = session,
+            channelId,
+            endpoint,
+        });
+    });
+
+    app.MapGet("/dev/orders/{reference}", (
+        string reference,
+        MemoryDatabase db) =>
+    {
+        var merchantId = Guid.Parse("01929999-0000-7000-8000-000000000001");
+        var order = db.Orders.Values.FirstOrDefault(o =>
+            o.TenantId == merchantId
+            && string.Equals(o.Reference, reference, StringComparison.Ordinal));
+
+        return order is null
+            ? Results.NotFound()
+            : Results.Ok(new
+            {
+                order.Reference,
+                order.Status,
+                order.Digit,
+                order.Reason,
+                order.ConfirmedAt,
+                events = db.Events
+                    .Where(e => e.TenantId == merchantId && e.OrderId == order.Id)
+                    .Select(e => new { e.Type, e.From, e.To, e.Actor, e.Detail, e.At })
+                    .ToList(),
+            });
+    });
 }
 
 // Not just "the process is up". A voice worker whose socket to Asterisk is down looks
@@ -63,6 +187,7 @@ internal sealed class VoiceWorker(
     DtmfCollector keypresses,
     IPromptVoice voice,
     IOrderStore orders,
+    IServiceScopeFactory scopes,
     VoiceHealth health,
     ILogger<VoiceWorker> log) : BackgroundService
 {
@@ -151,9 +276,8 @@ internal sealed class VoiceWorker(
 
                 if (calls.ReleaseByChannel(evt.ChannelId) is { } ended)
                 {
-                    // Phase 25 takes this to OrderTransitionService. Until then it is
-                    // written down, because a call that ended with an answer nobody
-                    // recorded is a call that has to be made again.
+                    await ApplyOutcomeAsync(ended, answer, ct).ConfigureAwait(false);
+
                     log.LogInformation(
                         "Call {CallSessionId} for order {OrderId} ended as {Outcome}",
                         ended.CallSessionId, ended.OrderId,
@@ -358,6 +482,45 @@ internal sealed class VoiceWorker(
         }
     }
 
+    private async Task ApplyOutcomeAsync(OutboundCall call, CallOutcome? outcome, CancellationToken ct)
+    {
+        var final = outcome ?? CallOutcome.NoAnswer;
+        var target = OrderLifecycle.FromCallOutcome(final);
+
+        await using var scope = scopes.CreateAsyncScope();
+        var workflow = scope.ServiceProvider.GetRequiredService<OrderWorkflowService>();
+
+        var result = await workflow.DecideAsync(new WorkflowDecisionCommand
+        {
+            MerchantId = call.MerchantId,
+            OrderId = call.OrderId,
+            To = target,
+            By = Actor.Machine,
+            Reason = final == CallOutcome.NoAnswer ? "call ended with no keypress" : "call ended with keypress",
+            Digit = final switch
+            {
+                CallOutcome.Confirmed => "1",
+                CallOutcome.Rejected => "0",
+                CallOutcome.NeedsHuman => "9",
+                _ => null,
+            },
+            EventType = target switch
+            {
+                OrderStatus.Confirmed => "order.confirmed",
+                OrderStatus.Rejected => "order.rejected",
+                OrderStatus.NeedsHuman => "order.needs_human",
+                _ => "order.changed",
+            },
+        }, ct).ConfigureAwait(false);
+
+        if (result.Outcome is TransitionOutcome.Refused or TransitionOutcome.NotFound)
+        {
+            log.LogWarning(
+                "Call {CallSessionId} outcome {Outcome} could not move order {OrderId}: {Reason}",
+                call.CallSessionId, final, call.OrderId, result.Reason ?? result.Outcome.ToString());
+        }
+    }
+
     private void Sweep()
     {
         foreach (var call in calls.Sweep(DateTimeOffset.UtcNow, Abandoned))
@@ -374,3 +537,12 @@ internal sealed class VoiceWorker(
     private static string Redact(Uri uri) =>
         $"{uri.Scheme}://{uri.Authority}{uri.AbsolutePath}";
 }
+
+internal sealed record DevSoftphoneCallRequest(
+    string? Endpoint,
+    string? FromNumber,
+    string? Reference,
+    string? ShopName,
+    string? CustomerName,
+    decimal? Amount,
+    string? Summary);

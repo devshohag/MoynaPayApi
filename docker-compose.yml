@@ -19,5 +19,20 @@ services:
       timeout: 3s
       retries: 10
 
+  asterisk:
+    image: ${ASTERISK_IMAGE:-andrius/asterisk:20}
+    ports:
+      - "5060:5060/udp"
+      - "8088:8088"
+      - "10000-10020:10000-10020/udp"
+    volumes:
+      - ./infra/asterisk/ari.conf:/etc/asterisk/ari.conf:ro
+      - ./infra/asterisk/http.conf:/etc/asterisk/http.conf:ro
+      - ./infra/asterisk/pjsip.conf:/etc/asterisk/pjsip.conf:ro
+      - ./infra/asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
+      - ./infra/asterisk/rtp.conf:/etc/asterisk/rtp.conf:ro
+      - ./.local/asterisk/sounds/custom:/var/lib/asterisk/sounds/custom
+    command: ["asterisk", "-f", "-vvv"]
+
 volumes:
   moynapay-data:

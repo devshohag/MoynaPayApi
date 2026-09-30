@@ -51,6 +51,16 @@ public sealed class AriClient
 
         var endpoint = $"PJSIP/{toNumber}@{trunkName}";
 
+        await OriginateEndpointAsync(callSessionId, channelId, fromNumber, endpoint, ct)
+            .ConfigureAwait(false);
+    }
+
+    public async Task OriginateEndpointAsync(Guid callSessionId, string channelId, string fromNumber,
+        string endpoint, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(channelId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(endpoint);
+
         var query = $"endpoint={Escape(endpoint)}&app={Escape(_appName)}" +
                     $"&callerId={Escape(fromNumber)}&channelId={Escape(channelId)}";
 
