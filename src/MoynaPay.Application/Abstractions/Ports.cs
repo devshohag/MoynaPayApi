@@ -80,6 +80,19 @@ public interface IMerchantStore
 
 public sealed record WebhookSendResult(bool Succeeded, int? StatusCode, string? FailureReason);
 
+/// <summary>
+/// Turns a line of the script into something Asterisk can play.
+///
+/// A port because the flow must not know whether the audio was synthesised just now, pulled
+/// from a cache, or is a file somebody recorded - and because phase 22 replaces the
+/// implementation without the flow noticing.
+/// </summary>
+public interface IPromptVoice
+{
+    /// <summary>An ARI media specifier, e.g. "sound:custom/greeting-abc123".</summary>
+    Task<string> MediaForAsync(string text, CancellationToken ct = default);
+}
+
 /// <param name="DeliveryId">
 /// Stable across every retry of one message. It is what a shop deduplicates on, and it is
 /// the only reason at-least-once delivery is safe for them to accept.

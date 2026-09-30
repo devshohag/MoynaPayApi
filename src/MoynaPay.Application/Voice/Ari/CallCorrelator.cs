@@ -3,8 +3,14 @@ using System.Collections.Concurrent;
 namespace MoynaPay.Application.Voice.Ari;
 
 /// <summary>A call we placed, and the order it is about.</summary>
+/// <param name="ShopName">
+/// Carried here rather than looked up when the call is answered. The greeting says the
+/// shop's name in its first sentence, and a database round trip on an answered line is
+/// silence the customer hears.
+/// </param>
 public sealed record OutboundCall(
-    Guid CallSessionId, Guid MerchantId, Guid OrderId, string ChannelId, DateTimeOffset PlacedAt);
+    Guid CallSessionId, Guid MerchantId, Guid OrderId, string ShopName, string ChannelId,
+    DateTimeOffset PlacedAt);
 
 /// <summary>
 /// Which call a channel belongs to.
@@ -42,12 +48,12 @@ public sealed class CallCorrelator
     /// StasisStart arrives for a call nothing knows about yet - and an unrecognised channel
     /// is a customer listening to silence while we work out who they are.
     /// </summary>
-    public string Register(Guid callSessionId, Guid merchantId, Guid orderId,
+    public string Register(Guid callSessionId, Guid merchantId, Guid orderId, string shopName,
         DateTimeOffset placedAt, string? channelId = null)
     {
         var id = channelId ?? $"moynapay-{Guid.CreateVersion7():N}";
 
-        var call = new OutboundCall(callSessionId, merchantId, orderId, id, placedAt);
+        var call = new OutboundCall(callSessionId, merchantId, orderId, shopName, id, placedAt);
 
         if (!_byChannel.TryAdd(id, call))
         {

@@ -67,6 +67,13 @@ public static class DependencyInjection
         services.AddSingleton<Voice.AriClient>();
         services.AddSingleton<Voice.AriEventStream>();
         services.AddSingleton<Application.Voice.Ari.CallCorrelator>();
+        services.AddSingleton<Application.Voice.DtmfCollector>();
+
+        // Speech arrives in phase 22. Until then this refuses to run outside development,
+        // because a call that rings a customer and plays silence is worse than no call.
+        services.AddSingleton<IPromptVoice>(sp => new Voice.UnsynthesisedVoice(
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<Voice.UnsynthesisedVoice>>(),
+            isDevelopment));
 
         if (IsInMemory(configuration))
         {

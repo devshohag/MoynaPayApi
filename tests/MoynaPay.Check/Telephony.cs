@@ -1,4 +1,6 @@
+using MoynaPay.Application.Voice;
 using MoynaPay.Application.Voice.Ari;
+using MoynaPay.Domain.Orders;
 
 namespace MoynaPay.Check;
 
@@ -20,6 +22,360 @@ internal static class Telephony
         Events(check);
         Correlation(check);
         Reconnect(check);
+        Keypresses(check);
+        Conversation(check);
+    }
+
+    // -----------------------------------------------------------------------
+    // The whole call, as a conversation
+    //
+    // Running one of these for real means ringing a phone and sitting through eight
+    // seconds of silence twice. All of it happens here instead, in a millisecond.
+    // -----------------------------------------------------------------------
+    private static void Conversation(Action<string, Func<bool>> check)
+    {
+        static Order Sample() => new()
+        {
+            TenantId = Guid.CreateVersion7(),
+            Reference = "ORD-7",
+            CustomerName = "রফিক",
+            Msisdn = "8801711223344",
+            Amount = 1250m,
+            Summary = "দুইটি শার্ট",
+        };
+
+        static CallFlow New(CallScript? script = null) =>
+            new(script ?? CallScript.Default, Sample(), "নীল দোকান");
+
+        check("the call opens with the greeting", () =>
+            New().Begin() is { Kind: CallActionKind.Play, Say: not null });
+
+        check("the greeting has the shop, the amount and the goods in it", () =>
+        {
+            var said = New().Begin().Say!;
+
+            return said.Contains("নীল দোকান", StringComparison.Ordinal)
+                && said.Contains("1250", StringComparison.Ordinal)
+                && said.Contains("দুইটি শার্ট", StringComparison.Ordinal);
+        });
+
+        // A server under a Bangla locale would otherwise substitute "১২৫০", which a speech
+        // model reads unpredictably - and a wrong amount on a confirmation call is worse
+        // than a clumsy one. The script's own "১ চাপুন" is written that way on purpose and
+        // is none of this check's business, so the assertion is about the amount alone.
+        check("the amount is substituted in western digits", () =>
+        {
+            var said = New().Begin().Say!;
+
+            return said.Contains("1250", StringComparison.Ordinal)
+                && !said.Contains("১২৫০", StringComparison.Ordinal);
+        });
+
+        check("after the greeting we listen", () =>
+        {
+            var flow = New();
+            flow.Begin();
+
+            return flow.Said() is { Kind: CallActionKind.Listen, For: not null }
+                && flow.Step == CallStep.Listening;
+        });
+
+        check("beginning twice does nothing the second time", () =>
+        {
+            var flow = New();
+            flow.Begin();
+
+            return flow.Begin().Kind == CallActionKind.Nothing;
+        });
+
+        // The rule a merchant notices when it is broken.
+        check("the closing line plays before the line drops", () =>
+        {
+            var flow = New();
+            flow.Begin();
+            flow.Said();
+
+            var closing = flow.Pressed(CallOutcome.Confirmed);
+
+            return closing.Kind == CallActionKind.Play
+                && closing.Say == CallScript.Default.Confirmed
+                && flow.Said().Kind == CallActionKind.Hangup;
+        });
+
+        check("the hangup carries what the call decided", () =>
+        {
+            var flow = New();
+            flow.Begin();
+            flow.Said();
+            flow.Pressed(CallOutcome.Confirmed);
+
+            return flow.Said().Outcome == CallOutcome.Confirmed && flow.Step == CallStep.Done;
+        });
+
+        check("each answer gets its own closing line", () =>
+        {
+            var reject = New();
+            reject.Begin();
+            reject.Said();
+
+            var human = New();
+            human.Begin();
+            human.Said();
+
+            return reject.Pressed(CallOutcome.Rejected).Say == CallScript.Default.Rejected
+                && human.Pressed(CallOutcome.NeedsHuman).Say == CallScript.Default.Handover;
+        });
+
+        // A customer who has heard this prompt before presses 1 over the top of it.
+        check("a key pressed over the greeting is taken", () =>
+        {
+            var flow = New();
+            flow.Begin();
+
+            return flow.Pressed(CallOutcome.Confirmed).Kind == CallActionKind.Play
+                && flow.Outcome == CallOutcome.Confirmed;
+        });
+
+        check("a key pressed after the closing started is ignored", () =>
+        {
+            var flow = New();
+            flow.Begin();
+            flow.Said();
+            flow.Pressed(CallOutcome.Confirmed);
+
+            return flow.Pressed(CallOutcome.Rejected).Kind == CallActionKind.Nothing
+                && flow.Outcome == CallOutcome.Confirmed;
+        });
+
+        check("silence brings the question again", () =>
+        {
+            var flow = New();
+            flow.Begin();
+            flow.Said();
+
+            var again = flow.Waited();
+
+            return again.Kind == CallActionKind.Play
+                && again.Say == CallScript.Default.Repeat
+                && flow.Asked == 2;
+        });
+
+        // The rule the whole product rests on: heard but never answered is not "no".
+        check("running out of prompts ends at a person, not a rejection", () =>
+        {
+            var flow = New();
+            flow.Begin();
+            flow.Said();
+            flow.Waited();      // the repeat
+            flow.Said();
+            var giveUp = flow.Waited();
+
+            return giveUp.Kind == CallActionKind.Play
+                && giveUp.Say == CallScript.Default.Handover
+                && flow.Outcome == CallOutcome.NeedsHuman
+                && flow.Outcome != CallOutcome.Rejected;
+        });
+
+        check("the script decides how many times to ask", () =>
+        {
+            var once = new CallScript
+            {
+                Greeting = "g", Repeat = "r", Confirmed = "c", Rejected = "x", Handover = "h",
+                Repeats = 0,
+            };
+
+            var flow = New(once);
+            flow.Begin();
+            flow.Said();
+
+            // No repeats allowed, so the first silence is the last.
+            return flow.Waited().Say == "h" && flow.Outcome == CallOutcome.NeedsHuman;
+        });
+
+        check("a timeout while nothing is playing does nothing", () =>
+        {
+            var flow = New();
+            flow.Begin();
+
+            return flow.Waited().Kind == CallActionKind.Nothing;
+        });
+
+        check("a customer who hangs up after answering has still answered", () =>
+        {
+            var flow = New();
+            flow.Begin();
+            flow.Said();
+            flow.Pressed(CallOutcome.Confirmed);
+
+            return flow.Ended() == CallOutcome.Confirmed;
+        });
+
+        check("a customer who hangs up saying nothing has decided nothing", () =>
+        {
+            var flow = New();
+            flow.Begin();
+            flow.Said();
+
+            return flow.Ended() is null;
+        });
+
+        check("nothing happens after the call is done", () =>
+        {
+            var flow = New();
+            flow.Begin();
+            flow.Ended();
+
+            return flow.Said().Kind == CallActionKind.Nothing
+                && flow.Pressed(CallOutcome.Confirmed).Kind == CallActionKind.Nothing
+                && flow.Waited().Kind == CallActionKind.Nothing;
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // What the customer pressed
+    //
+    // Every rule below exists to stop noise becoming a decision. A wrongly confirmed
+    // order ships goods nobody asked for; a wrongly rejected one deletes a sale that
+    // was already made. Both are worse than handing the order to a person.
+    // -----------------------------------------------------------------------
+    private static void Keypresses(Action<string, Func<bool>> check)
+    {
+        var script = CallScript.Default;
+        var now = new DateTimeOffset(2026, 9, 29, 12, 0, 0, TimeSpan.Zero);
+
+        static DtmfCollector Listening(string channel)
+        {
+            var collector = new DtmfCollector();
+            collector.Listen(channel);
+            return collector;
+        }
+
+        check("1 confirms", () =>
+            Listening("c").Press("c", "1", script, now)
+                is { Outcome: KeypressOutcome.Accepted, Decision: CallOutcome.Confirmed });
+
+        check("0 rejects", () =>
+            Listening("c").Press("c", "0", script, now)
+                is { Outcome: KeypressOutcome.Accepted, Decision: CallOutcome.Rejected });
+
+        check("9 asks for a person", () =>
+            Listening("c").Press("c", "9", script, now)
+                is { Outcome: KeypressOutcome.Accepted, Decision: CallOutcome.NeedsHuman });
+
+        // The rule that stops a slipped thumb from cancelling a confirmed order.
+        check("the first answer is the answer", () =>
+        {
+            var keys = Listening("c");
+            keys.Press("c", "1", script, now);
+
+            var second = keys.Press("c", "0", script, now.AddSeconds(1));
+
+            return second.Outcome == KeypressOutcome.Ignored
+                && keys.Decided("c", out var decision)
+                && decision == CallOutcome.Confirmed;
+        });
+
+        check("a key on a channel we are not listening to does nothing", () =>
+            new DtmfCollector().Press("someone-elses-channel", "1", script, now).Outcome
+                == KeypressOutcome.Ignored);
+
+        check("a key on a null channel does nothing", () =>
+            new DtmfCollector().Press(null!, "1", script, now).Outcome == KeypressOutcome.Ignored);
+
+        check("a meaningless key is not an answer", () =>
+            Listening("c").Press("c", "5", script, now)
+                is { Outcome: KeypressOutcome.Unknown, Decision: null });
+
+        check("a star is not an answer", () =>
+            Listening("c").Press("c", "*", script, now).Decision is null);
+
+        check("an empty digit is not an answer", () =>
+            Listening("c").Press("c", "", script, now).Decision is null);
+
+        // Asterisk repeats a long press. Without the debounce, a customer resting a finger
+        // on 5 burns all three tries in a quarter of a second.
+        check("one key reported twice is one key", () =>
+        {
+            var keys = Listening("c");
+            keys.Press("c", "5", script, now);
+
+            var repeat = keys.Press("c", "5", script, now.AddMilliseconds(50));
+
+            return repeat.Outcome == KeypressOutcome.Ignored && repeat.UnknownPresses == 1;
+        });
+
+        check("the same key pressed again later is a new press", () =>
+        {
+            var keys = Listening("c");
+            keys.Press("c", "5", script, now);
+
+            var again = keys.Press("c", "5", script, now.AddSeconds(2));
+
+            return again.UnknownPresses == 2;
+        });
+
+        // The rule the product cannot survive breaking: the machine never decides "no".
+        check("wrong keys end at a person, never at a rejection", () =>
+        {
+            var keys = Listening("c");
+
+            keys.Press("c", "5", script, now);
+            keys.Press("c", "6", script, now.AddSeconds(1));
+
+            var third = keys.Press("c", "7", script, now.AddSeconds(2));
+
+            return third.Outcome == KeypressOutcome.Exhausted
+                && third.Decision == CallOutcome.NeedsHuman
+                && third.Decision != CallOutcome.Rejected;
+        });
+
+        check("two wrong keys are not yet exhausted", () =>
+        {
+            var keys = Listening("c");
+            keys.Press("c", "5", script, now);
+
+            return keys.Press("c", "6", script, now.AddSeconds(1)).Outcome
+                == KeypressOutcome.Unknown;
+        });
+
+        check("a wrong key does not stop a right one", () =>
+        {
+            var keys = Listening("c");
+            keys.Press("c", "5", script, now);
+
+            return keys.Press("c", "1", script, now.AddSeconds(1)).Decision == CallOutcome.Confirmed;
+        });
+
+        check("a call with no keypress has no answer", () =>
+            !Listening("c").Decided("c", out _));
+
+        check("forgetting a call hands back its answer", () =>
+        {
+            var keys = Listening("c");
+            keys.Press("c", "1", script, now);
+
+            return keys.Forget("c") == CallOutcome.Confirmed && keys.Count == 0;
+        });
+
+        // Silence is not a rejection. It is the absence of an answer, and the caller has to
+        // be able to tell the two apart.
+        check("forgetting a silent call hands back nothing", () =>
+            Listening("c").Forget("c") is null);
+
+        check("forgetting a call we never had is harmless", () =>
+            new DtmfCollector().Forget("c") is null);
+
+        check("two calls do not hear each other's keys", () =>
+        {
+            var keys = new DtmfCollector();
+            keys.Listen("a");
+            keys.Listen("b");
+
+            keys.Press("a", "1", script, now);
+
+            return keys.Decided("a", out var first) && first == CallOutcome.Confirmed
+                && !keys.Decided("b", out _);
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -88,7 +444,7 @@ internal static class Telephony
         check("a channel id is claimed before the call is placed", () =>
         {
             var calls = new CallCorrelator();
-            var id = calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), now);
+            var id = calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), "Test Shop", now);
 
             return !string.IsNullOrWhiteSpace(id) && calls.TryGetByChannel(id, out _);
         });
@@ -97,7 +453,7 @@ internal static class Telephony
         {
             var calls = new CallCorrelator();
             var order = Guid.CreateVersion7();
-            var id = calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), order, now);
+            var id = calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), order, "Test Shop", now);
 
             return calls.TryGetByChannel(id, out var call) && call.OrderId == order;
         });
@@ -110,7 +466,7 @@ internal static class Telephony
         {
             var calls = new CallCorrelator();
             var session = Guid.CreateVersion7();
-            var id = calls.Register(session, Guid.CreateVersion7(), Guid.CreateVersion7(), now);
+            var id = calls.Register(session, Guid.CreateVersion7(), Guid.CreateVersion7(), "Test Shop", now);
 
             // No response has been processed - only the registration exists.
             return calls.TryGetByChannel(id, out var call) && call.CallSessionId == session;
@@ -125,11 +481,11 @@ internal static class Telephony
         check("two calls cannot claim one channel id", () =>
         {
             var calls = new CallCorrelator();
-            var id = calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), now);
+            var id = calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), "Test Shop", now);
 
             try
             {
-                calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), now, id);
+                calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), "Test Shop", now, id);
                 return false;
             }
             catch (InvalidOperationException)
@@ -143,7 +499,7 @@ internal static class Telephony
         {
             var calls = new CallCorrelator();
             var session = Guid.CreateVersion7();
-            calls.Register(session, Guid.CreateVersion7(), Guid.CreateVersion7(), now);
+            calls.Register(session, Guid.CreateVersion7(), Guid.CreateVersion7(), "Test Shop", now);
 
             return calls.TryAdopt("PJSIP/whatever-00000009", session, out var call)
                 && call.ChannelId == "PJSIP/whatever-00000009"
@@ -157,7 +513,7 @@ internal static class Telephony
         {
             var calls = new CallCorrelator();
             var session = Guid.CreateVersion7();
-            var id = calls.Register(session, Guid.CreateVersion7(), Guid.CreateVersion7(), now);
+            var id = calls.Register(session, Guid.CreateVersion7(), Guid.CreateVersion7(), "Test Shop", now);
 
             return calls.Release(session) is not null
                 && !calls.TryGetByChannel(id, out _)
@@ -169,7 +525,7 @@ internal static class Telephony
         {
             var calls = new CallCorrelator();
             var session = Guid.CreateVersion7();
-            calls.Register(session, Guid.CreateVersion7(), Guid.CreateVersion7(), now);
+            calls.Register(session, Guid.CreateVersion7(), Guid.CreateVersion7(), "Test Shop", now);
 
             return calls.Release(session) is not null && calls.Release(session) is null;
         });
@@ -178,7 +534,7 @@ internal static class Telephony
         {
             var calls = new CallCorrelator();
             var order = Guid.CreateVersion7();
-            var id = calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), order, now);
+            var id = calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), order, "Test Shop", now);
 
             return calls.ReleaseByChannel(id)?.OrderId == order;
         });
@@ -188,7 +544,7 @@ internal static class Telephony
         check("a call that was never seen is swept", () =>
         {
             var calls = new CallCorrelator();
-            calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), now);
+            calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), "Test Shop", now);
 
             var dropped = calls.Sweep(now.AddMinutes(11), TimeSpan.FromMinutes(10));
 
@@ -198,7 +554,7 @@ internal static class Telephony
         check("a call still in progress is not swept", () =>
         {
             var calls = new CallCorrelator();
-            calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), now);
+            calls.Register(Guid.CreateVersion7(), Guid.CreateVersion7(), Guid.CreateVersion7(), "Test Shop", now);
 
             return calls.Sweep(now.AddMinutes(9), TimeSpan.FromMinutes(10)).Count == 0
                 && calls.Count == 1;
@@ -212,8 +568,8 @@ internal static class Telephony
             var orderA = Guid.CreateVersion7();
             var orderB = Guid.CreateVersion7();
 
-            var idA = calls.Register(a, Guid.CreateVersion7(), orderA, now);
-            var idB = calls.Register(b, Guid.CreateVersion7(), orderB, now);
+            var idA = calls.Register(a, Guid.CreateVersion7(), orderA, "Test Shop", now);
+            var idB = calls.Register(b, Guid.CreateVersion7(), orderB, "Test Shop", now);
 
             calls.Release(a);
 
