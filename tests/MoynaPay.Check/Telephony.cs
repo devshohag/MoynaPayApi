@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Net;
 using Microsoft.Extensions.Configuration;
+using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Voice.Media;
 using MoynaPay.Application.Voice.Media.AudioSocket;
 using MoynaPay.Application.Voice.Speech;
@@ -40,6 +41,8 @@ internal static class Telephony
     // -----------------------------------------------------------------------
     private static void Speech(Action<string, Func<bool>> check)
     {
+        var speechNow = new DateTimeOffset(2026, 9, 30, 12, 0, 0, TimeSpan.Zero);
+
         static byte[] Tone(int samples, int periodSamples, short amplitude = 8000)
         {
             var payload = new byte[samples * 2];
@@ -434,6 +437,131 @@ internal static class Telephony
                 && options.Model == "configured-model"
                 && options.Voice == "configured-voice"
                 && options.SoundsPath == "/shared/sounds/custom";
+        });
+
+        check("Gemini quota opens the circuit and falls back to keypress audio", () =>
+        {
+            var path = TempSounds();
+            try
+            {
+                var handler = new RecordingHandler(new HttpResponseMessage(HttpStatusCode.TooManyRequests)
+                {
+                    ReasonPhrase = "Too Many Requests",
+                    Content = new StringContent("{\"error\":{\"status\":\"RESOURCE_EXHAUSTED\"}}"),
+                });
+                var primary = new CachedPromptVoice(
+                    new GeminiTtsClient(new HttpClient(handler), new TtsOptions("key", "model-a", "voice-a", path)),
+                    new TtsOptions("key", "model-a", "voice-a", path));
+                var clock = new ManualClock(speechNow);
+                var circuit = new SpeechQuotaCircuit(clock, TimeSpan.FromMinutes(5));
+                var voice = new CircuitBreakerPromptVoice(
+                    primary,
+                    new FallbackPromptVoice("sound:custom/keypad-only"),
+                    circuit);
+
+                var first = voice.MediaForAsync("hello").GetAwaiter().GetResult();
+                var second = voice.MediaForAsync("hello again").GetAwaiter().GetResult();
+
+                return first == "sound:custom/keypad-only"
+                    && second == "sound:custom/keypad-only"
+                    && circuit.IsOpen
+                    && handler.Calls == 1;
+            }
+            finally
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        });
+
+        check("quota circuit retries Gemini after cooldown", () =>
+        {
+            var path = TempSounds();
+            try
+            {
+                var handler = new RecordingHandler(new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        candidates = new[]
+                        {
+                            new
+                            {
+                                content = new
+                                {
+                                    parts = new[]
+                                    {
+                                        new
+                                        {
+                                            inlineData = new
+                                            {
+                                                mimeType = "audio/l16;rate=24000",
+                                                data = Convert.ToBase64String(Tone(240, 24)),
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    })),
+                });
+                var primary = new CachedPromptVoice(
+                    new GeminiTtsClient(new HttpClient(handler), new TtsOptions("key", "model-a", "voice-a", path)),
+                    new TtsOptions("key", "model-a", "voice-a", path));
+                var clock = new ManualClock(speechNow);
+                var circuit = new SpeechQuotaCircuit(clock, TimeSpan.FromMinutes(5));
+                circuit.Open();
+                var voice = new CircuitBreakerPromptVoice(
+                    primary,
+                    new FallbackPromptVoice("sound:custom/keypad-only"),
+                    circuit);
+
+                var fallback = voice.MediaForAsync("during cooldown").GetAwaiter().GetResult();
+                clock.UtcNow = speechNow.AddMinutes(6);
+                var media = voice.MediaForAsync("after cooldown").GetAwaiter().GetResult();
+
+                return fallback == "sound:custom/keypad-only"
+                    && media.StartsWith(CachedPromptVoice.MediaPrefix, StringComparison.Ordinal)
+                    && handler.Calls == 1;
+            }
+            finally
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        });
+
+        check("non-quota TTS failures do not open the fallback circuit", () =>
+        {
+            var path = TempSounds();
+            try
+            {
+                var handler = new RecordingHandler(new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                {
+                    ReasonPhrase = "Internal Server Error",
+                    Content = new StringContent("boom"),
+                });
+                var primary = new CachedPromptVoice(
+                    new GeminiTtsClient(new HttpClient(handler), new TtsOptions("key", "model-a", "voice-a", path)),
+                    new TtsOptions("key", "model-a", "voice-a", path));
+                var circuit = new SpeechQuotaCircuit(new ManualClock(speechNow), TimeSpan.FromMinutes(5));
+                var voice = new CircuitBreakerPromptVoice(
+                    primary,
+                    new FallbackPromptVoice("sound:custom/keypad-only"),
+                    circuit);
+
+                try
+                {
+                    _ = voice.MediaForAsync("hello").GetAwaiter().GetResult();
+                    return false;
+                }
+                catch (HttpRequestException)
+                {
+                    return !circuit.IsOpen && handler.Calls == 1;
+                }
+            }
+            finally
+            {
+                Directory.Delete(path, recursive: true);
+            }
         });
 
         static IConfiguration EmptyConfiguration() => new ConfigurationBuilder().Build();
@@ -1353,9 +1481,12 @@ internal static class Telephony
 
         public string? Body { get; private set; }
 
+        public int Calls { get; private set; }
+
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            Calls++;
             RequestUri = request.RequestUri;
             Body = request.Content is null
                 ? null
@@ -1363,6 +1494,11 @@ internal static class Telephony
 
             return response;
         }
+    }
+
+    private sealed class ManualClock(DateTimeOffset at) : IClock
+    {
+        public DateTimeOffset UtcNow { get; set; } = at;
     }
 
     private sealed class SingleClientFactory(HttpClient client) : IHttpClientFactory

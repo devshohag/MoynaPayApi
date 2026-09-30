@@ -78,7 +78,18 @@ public static class DependencyInjection
             configuration["Telephony:DevSoftphoneEndpoint"],
             configuration["Telephony:DialEndpointTemplate"]));
         services.AddHttpClient<IStreamingSpeechSynthesizer, Voice.GeminiTtsClient>();
-        services.AddSingleton<IPromptVoice, Voice.CachedPromptVoice>();
+        services.AddSingleton<Voice.CachedPromptVoice>();
+        services.AddSingleton(sp => new Application.Voice.SpeechQuotaCircuit(
+            sp.GetRequiredService<IClock>(),
+            TimeSpan.FromSeconds(Math.Clamp(
+                int.TryParse(configuration["Telephony:Tts:QuotaCooldownSeconds"], out var seconds)
+                    ? seconds
+                    : 300,
+                30,
+                3600))));
+        services.AddSingleton(_ => new Voice.FallbackPromptVoice(
+            configuration["Telephony:Tts:FallbackMedia"] ?? "sound:custom/moynapay-keypress-only"));
+        services.AddSingleton<IPromptVoice, Voice.CircuitBreakerPromptVoice>();
         services.AddSingleton<IHandoffContextSummarizer, DeterministicHandoffContextSummarizer>();
         services.AddScoped<HandoffContextService>();
         services.AddSingleton<IRecordingArchive, NoopRecordingArchive>();

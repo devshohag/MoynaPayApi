@@ -37,7 +37,9 @@ public sealed class GeminiTtsClient(HttpClient http, TtsOptions options) : IStre
         {
             var error = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             throw new HttpRequestException(
-                $"Gemini TTS returned {(int)response.StatusCode} ({response.ReasonPhrase}): {error}");
+                $"Gemini TTS returned {(int)response.StatusCode} ({response.ReasonPhrase}): {error}",
+                null,
+                response.StatusCode);
         }
 
         await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
