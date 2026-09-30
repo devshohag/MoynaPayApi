@@ -10,6 +10,8 @@ using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Orders;
 using MoynaPay.Application.Security;
 using MoynaPay.Application.Voice;
+using MoynaPay.Application.Voice.Ai;
+using MoynaPay.Application.Voice.Speech;
 using MoynaPay.Application.Workflows;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
@@ -246,6 +248,31 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
 
     return (h.Db, new AiProposalGate(orders, workflow), workflow);
 }
+
+(MemoryDatabase Db, VoiceAiDecisionService Decisions, FakeConversationModel Model,
+    OrderWorkflowService Workflow) VoiceAiHarness(
+    string response,
+    bool calls = true,
+    bool pay = false,
+    bool courier = false,
+    bool webhook = true)
+{
+    var h = AiGateHarness(calls: calls, pay: pay, courier: courier, webhook: webhook);
+    var model = new FakeConversationModel(response);
+
+    return (h.Db, new VoiceAiDecisionService(model, h.Gate), model, h.Workflow);
+}
+
+VoiceAiDecisionCommand VoiceDecision(Guid orderId, string transcript) => new()
+{
+    MerchantId = merchantId,
+    OrderId = orderId,
+    CallSessionId = Guid.CreateVersion7(),
+    Transcript =
+    [
+        new Transcript(transcript, true, 0.95, now),
+    ],
+};
 
 (MemoryDatabase Db, ReviewQueueService Reviews, OrderWorkflowService Workflow) ReviewHarness(
     DateTimeOffset? at = null,
@@ -1316,6 +1343,76 @@ await CheckAsync("AI proposals against lifecycle rules go to human review", asyn
 
     return gate.Outcome == AiGateOutcome.SentToReview
         && gate.Order!.Status == OrderStatus.NeedsHuman;
+});
+
+await CheckAsync("voice AI confirm executes only through the phase 10 gate", async () =>
+{
+    var h = VoiceAiHarness("""{"outcome":"confirm","confidence":0.96}""", calls: true, pay: false);
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var decision = await h.Decisions.DecideAsync(VoiceDecision(r.Order!.Id, "yes, please confirm the order"));
+
+    return decision.Outcome == AiGateOutcome.Executed
+        && decision.ProposedOutcome == AiProposedOutcome.Confirm
+        && decision.Order!.Status == OrderStatus.Confirmed
+        && h.Db.Events.Any(e => e.Type == "order.confirmed");
+});
+
+await CheckAsync("voice AI reject is routed to human review by the gate", async () =>
+{
+    var h = VoiceAiHarness("""{"outcome":"reject","confidence":0.99}""", calls: true, pay: false);
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var decision = await h.Decisions.DecideAsync(VoiceDecision(r.Order!.Id, "no, I do not want this order"));
+
+    return decision.Outcome == AiGateOutcome.SentToReview
+        && decision.ProposedOutcome == AiProposedOutcome.Reject
+        && decision.Order!.Status == OrderStatus.NeedsHuman
+        && decision.Reason == "ai.reject_requires_human";
+});
+
+await CheckAsync("voice AI low-confidence confirm goes to human review", async () =>
+{
+    var h = VoiceAiHarness("""{"outcome":"confirm","confidence":0.51}""", calls: true, pay: false);
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var decision = await h.Decisions.DecideAsync(VoiceDecision(r.Order!.Id, "I think it is okay"));
+
+    return decision.Outcome == AiGateOutcome.SentToReview
+        && decision.Order!.Status == OrderStatus.NeedsHuman
+        && decision.Reason == "ai.low_confidence";
+});
+
+await CheckAsync("voice AI malformed output falls back to human review", async () =>
+{
+    var h = VoiceAiHarness("probably confirmed", calls: true, pay: false);
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var decision = await h.Decisions.DecideAsync(VoiceDecision(r.Order!.Id, "okay"));
+
+    return decision.Outcome == AiGateOutcome.SentToReview
+        && decision.ProposedOutcome == AiProposedOutcome.NeedsHuman
+        && decision.Order!.Status == OrderStatus.NeedsHuman;
+});
+
+await CheckAsync("voice AI sends final transcript text to the model", async () =>
+{
+    var h = VoiceAiHarness("""{"outcome":"needs_human","confidence":1}""", calls: true, pay: false);
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    await h.Decisions.DecideAsync(new VoiceAiDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        CallSessionId = Guid.CreateVersion7(),
+        Transcript =
+        [
+            new Transcript("partial words", false, 0.4, now),
+            new Transcript("final answer", true, 0.9, now.AddSeconds(1)),
+        ],
+    });
+
+    return h.Model.LastUserText == "final answer";
 });
 
 // ---------------------------------------------------------------------------
@@ -2474,6 +2571,25 @@ sealed class PrefixProtector : ISecretProtector
         keyRingId == KeyRing && cipher.StartsWith("sealed:", StringComparison.Ordinal)
             ? cipher["sealed:".Length..]
             : throw new InvalidOperationException("bad cipher");
+}
+
+sealed class FakeConversationModel(string response) : IConversationModel
+{
+    public string ProviderName => "fake-llm";
+
+    public string? LastUserText { get; private set; }
+
+    public async IAsyncEnumerable<ModelChunk> RespondAsync(
+        ConversationState state,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        LastUserText = state.History.LastOrDefault(t => t.Role == "user")?.Text;
+
+        await Task.Yield();
+        ct.ThrowIfCancellationRequested();
+        yield return new TextDelta(response);
+        yield return new ModelCompleted("stop");
+    }
 }
 
 sealed class RecordingWebhookSender(bool succeeds) : IWebhookSender
