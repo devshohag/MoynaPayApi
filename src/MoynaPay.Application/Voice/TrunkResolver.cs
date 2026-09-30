@@ -29,7 +29,7 @@ public sealed class TrunkResolver(ISipTrunkStore trunks, TelephonyRoutingOptions
         {
             return new ResolvedTrunk(
                 trunk.CallerId,
-                Endpoint(order.Msisdn, trunk.Host));
+                Endpoint(order.Msisdn, trunk.EndpointName ?? trunk.Host));
         }
 
         if (!string.IsNullOrWhiteSpace(options.DialEndpointTemplate))

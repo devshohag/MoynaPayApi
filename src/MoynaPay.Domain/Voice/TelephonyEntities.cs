@@ -8,6 +8,7 @@ public class SipTrunk : BaseEntity
 {
     public string ProviderName { get; set; } = default!;
     public string Host { get; set; } = default!;
+    public string? EndpointName { get; set; }
     public int Port { get; set; } = 5060;
     public SipAuthMode AuthMode { get; set; } = SipAuthMode.UserPassword;
     public string? Username { get; set; }

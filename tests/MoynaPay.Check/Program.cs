@@ -2251,11 +2251,12 @@ TrunkResolver TrunkResolver(MemoryDatabase db) =>
         null,
         null));
 
-SipTrunk Trunk(Guid tenant, string host, string callerId, bool active = true) => new()
+SipTrunk Trunk(Guid tenant, string host, string callerId, bool active = true, string? endpointName = null) => new()
 {
     TenantId = tenant,
     ProviderName = "BTRC IPTSP",
     Host = host,
+    EndpointName = endpointName,
     CallerId = callerId,
     IsActive = active,
     CreatedAt = now,
@@ -2305,12 +2306,28 @@ await CheckAsync("phase 30: a merchant trunk controls caller id and endpoint", a
 {
     var db = DiallerDb();
     var order = AddOrder(db, "TRUNK-MERCHANT", OrderStatus.Calling, now, msisdn: "8801711223344");
-    db.SipTrunks[Guid.CreateVersion7()] = Trunk(merchantId, "merchant-trunk", "09613333333");
+    db.SipTrunks[Guid.CreateVersion7()] = Trunk(
+        merchantId,
+        "sip.same-provider.example",
+        "09613333333",
+        endpointName: "merchant-trunk");
 
     var route = await TrunkResolver(db).ResolveAsync(order);
 
     return route.CallerId == "09613333333"
         && route.Endpoint == "PJSIP/8801711223344@merchant-trunk";
+});
+
+await CheckAsync("phase 30: a trunk without endpoint name falls back to host", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "TRUNK-HOST", OrderStatus.Calling, now, msisdn: "8801711223344");
+    db.SipTrunks[Guid.CreateVersion7()] = Trunk(merchantId, "host-trunk", "09614444444");
+
+    var route = await TrunkResolver(db).ResolveAsync(order);
+
+    return route.CallerId == "09614444444"
+        && route.Endpoint == "PJSIP/8801711223344@host-trunk";
 });
 
 // ---------------------------------------------------------------------------

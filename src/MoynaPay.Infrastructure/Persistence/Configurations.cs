@@ -270,6 +270,7 @@ internal sealed class SipTrunkConfiguration : IEntityTypeConfiguration<SipTrunk>
 
         builder.Property(x => x.ProviderName).HasMaxLength(120).IsRequired();
         builder.Property(x => x.Host).HasMaxLength(200).IsRequired();
+        builder.Property(x => x.EndpointName).HasMaxLength(120);
         builder.Property(x => x.Username).HasMaxLength(120);
         builder.Property(x => x.SecretStoreReference).HasMaxLength(200);
         builder.Property(x => x.CallerId).HasMaxLength(40).IsRequired();
