@@ -259,8 +259,12 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
 {
     var h = AiGateHarness(calls: calls, pay: pay, courier: courier, webhook: webhook);
     var model = new FakeConversationModel(response);
+    var handoff = new HandoffContextService(
+        new MemoryOrderStore(h.Db),
+        new DeterministicHandoffContextSummarizer(),
+        new FixedClock(now));
 
-    return (h.Db, new VoiceAiDecisionService(model, h.Gate), model, h.Workflow);
+    return (h.Db, new VoiceAiDecisionService(model, h.Gate, handoff), model, h.Workflow);
 }
 
 VoiceAiDecisionCommand VoiceDecision(Guid orderId, string transcript) => new()
@@ -273,6 +277,24 @@ VoiceAiDecisionCommand VoiceDecision(Guid orderId, string transcript) => new()
         new Transcript(transcript, true, 0.95, now),
     ],
 };
+
+(MemoryDatabase Db, HandoffContextService Handoff, ReviewQueueService Reviews,
+    OrderWorkflowService Workflow) HandoffHarness(
+    DateTimeOffset? at = null,
+    bool calls = true,
+    bool pay = false,
+    bool courier = false,
+    bool webhook = true)
+{
+    var h = ReviewHarness(at: at, calls: calls, pay: pay, courier: courier, webhook: webhook);
+    var orders = new MemoryOrderStore(h.Db);
+    var clock = new FixedClock(at ?? now);
+
+    return (h.Db,
+        new HandoffContextService(orders, new DeterministicHandoffContextSummarizer(), clock),
+        h.Reviews,
+        h.Workflow);
+}
 
 (MemoryDatabase Db, ReviewQueueService Reviews, OrderWorkflowService Workflow) ReviewHarness(
     DateTimeOffset? at = null,
@@ -1368,7 +1390,10 @@ await CheckAsync("voice AI reject is routed to human review by the gate", async 
     return decision.Outcome == AiGateOutcome.SentToReview
         && decision.ProposedOutcome == AiProposedOutcome.Reject
         && decision.Order!.Status == OrderStatus.NeedsHuman
-        && decision.Reason == "ai.reject_requires_human";
+        && decision.Reason == "ai.reject_requires_human"
+        && h.Db.Events.Any(e => e.Type == "voice.handoff_context"
+            && e.OrderId == r.Order.Id
+            && e.Detail == "no, I do not want this order");
 });
 
 await CheckAsync("voice AI low-confidence confirm goes to human review", async () =>
@@ -1413,6 +1438,115 @@ await CheckAsync("voice AI sends final transcript text to the model", async () =
     });
 
     return h.Model.LastUserText == "final answer";
+});
+
+await CheckAsync("handoff context is written to the order timeline", async () =>
+{
+    var h = HandoffHarness();
+    var r = await h.Workflow.CreateAsync(Cmd());
+    await h.Workflow.DecideAsync(new WorkflowDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        To = OrderStatus.NeedsHuman,
+        By = Actor.Machine,
+        Reason = "customer asked for a person",
+        EventType = "order.needs_human",
+    });
+
+    var callSession = Guid.Parse("01929999-0000-7000-8000-000000000028");
+    var result = await h.Handoff.RecordAsync(new HandoffContextCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order.Id,
+        CallSessionId = callSession,
+        TranscriptText = "Agent: Do you confirm?\nCustomer: I need to talk to someone.",
+        HandoffReason = "customer requested human help",
+    });
+
+    var handoff = h.Db.Events.Single(e => e.Type == "voice.handoff_context");
+    return result.Outcome == HandoffContextOutcome.Recorded
+        && result.Context is { UsedFallback: true, Provider: "deterministic-fallback" }
+        && handoff.OrderId == r.Order.Id
+        && handoff.From == OrderStatus.NeedsHuman
+        && handoff.To == OrderStatus.NeedsHuman
+        && handoff.Detail == "I need to talk to someone."
+        && handoff.PayloadJson is not null
+        && handoff.PayloadJson.Contains(callSession.ToString(), StringComparison.Ordinal)
+        && handoff.PayloadJson.Contains("suggestedOpening", StringComparison.Ordinal);
+});
+
+await CheckAsync("handoff summary exists before a human claims the review", async () =>
+{
+    var h = HandoffHarness();
+    var r = await h.Workflow.CreateAsync(Cmd());
+    await h.Workflow.DecideAsync(new WorkflowDecisionCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        To = OrderStatus.NeedsHuman,
+        By = Actor.Machine,
+        Reason = "ai.low_confidence",
+        EventType = "order.needs_human",
+    });
+
+    await h.Handoff.RecordAsync(new HandoffContextCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order.Id,
+        CallSessionId = Guid.CreateVersion7(),
+        TranscriptText = "Customer: Maybe later.",
+        HandoffReason = "low confidence model decision",
+    });
+
+    await h.Reviews.ClaimAsync(new ReviewClaimCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order.Id,
+        Reviewer = "rafi",
+    });
+
+    var handoff = h.Db.Events.Single(e => e.Type == "voice.handoff_context");
+    var claim = h.Db.Events.Single(e => e.Type == "review.claimed");
+    return handoff.At <= claim.At;
+});
+
+await CheckAsync("handoff context handles an empty transcript", async () =>
+{
+    var h = HandoffHarness();
+    var r = await h.Workflow.CreateAsync(Cmd());
+
+    var result = await h.Handoff.RecordAsync(new HandoffContextCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        CallSessionId = Guid.CreateVersion7(),
+        TranscriptText = "",
+        HandoffReason = "caller pressed 9",
+    });
+
+    var handoff = h.Db.Events.Single(e => e.Type == "voice.handoff_context");
+    return result.Outcome == HandoffContextOutcome.Recorded
+        && result.Context!.Summary == "caller pressed 9"
+        && result.Context.SuggestedOpening.Length > 0
+        && handoff.Detail == "caller pressed 9";
+});
+
+await CheckAsync("handoff context for a missing order is not recorded", async () =>
+{
+    var h = HandoffHarness();
+
+    var result = await h.Handoff.RecordAsync(new HandoffContextCommand
+    {
+        MerchantId = merchantId,
+        OrderId = Guid.CreateVersion7(),
+        CallSessionId = Guid.CreateVersion7(),
+        TranscriptText = "Customer: hello",
+        HandoffReason = "not found",
+    });
+
+    return result.Outcome == HandoffContextOutcome.NotFound
+        && h.Db.Events.All(e => e.Type != "voice.handoff_context");
 });
 
 // ---------------------------------------------------------------------------

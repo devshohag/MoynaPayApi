@@ -27,7 +27,8 @@ public sealed record VoiceAiDecisionResult(
 
 public sealed class VoiceAiDecisionService(
     IConversationModel model,
-    AiProposalGate gate)
+    AiProposalGate gate,
+    HandoffContextService? handoff = null)
 {
     public async Task<VoiceAiDecisionResult> DecideAsync(
         VoiceAiDecisionCommand command,
@@ -65,6 +66,20 @@ public sealed class VoiceAiDecisionService(
             Confidence = decision.Confidence,
             ConfidenceThreshold = command.ConfidenceThreshold,
         }, ct).ConfigureAwait(false);
+
+        if (handoff is not null
+            && result.Outcome == AiGateOutcome.SentToReview
+            && result.Order is not null)
+        {
+            await handoff.RecordAsync(new HandoffContextCommand
+            {
+                MerchantId = command.MerchantId,
+                OrderId = command.OrderId,
+                CallSessionId = command.CallSessionId,
+                TranscriptText = transcript,
+                HandoffReason = result.Reason ?? "ai sent call to human review",
+            }, ct).ConfigureAwait(false);
+        }
 
         return new VoiceAiDecisionResult(
             result.Outcome,

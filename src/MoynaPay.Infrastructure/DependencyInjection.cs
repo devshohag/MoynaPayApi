@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MoynaPay.Application.Abstractions;
+using MoynaPay.Application.Voice.Ai;
 using MoynaPay.Application.Voice.Speech;
 using MoynaPay.Infrastructure.Memory;
 using MoynaPay.Infrastructure.Security;
@@ -77,6 +78,8 @@ public static class DependencyInjection
             configuration["Telephony:DialEndpointTemplate"]));
         services.AddHttpClient<IStreamingSpeechSynthesizer, Voice.GeminiTtsClient>();
         services.AddSingleton<IPromptVoice, Voice.CachedPromptVoice>();
+        services.AddSingleton<IHandoffContextSummarizer, DeterministicHandoffContextSummarizer>();
+        services.AddScoped<HandoffContextService>();
         services.AddScoped<Application.Voice.TrunkResolver>();
 
         if (IsInMemory(configuration))
