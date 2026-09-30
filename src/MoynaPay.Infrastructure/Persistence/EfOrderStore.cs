@@ -107,6 +107,7 @@ public sealed class EfOrderStore(MoynaPayDbContext db) : IOrderStore
                    AND m.is_deleted = false
                  WHERE candidate.is_deleted = false
                    AND candidate.status IN ({received}, {calling})
+                   AND (candidate.next_call_attempt_at IS NULL OR candidate.next_call_attempt_at <= {now})
                    AND (candidate.claimed_until IS NULL OR candidate.claimed_until <= {now})
                  ORDER BY candidate.created_at
                  LIMIT {take}
@@ -143,6 +144,82 @@ public sealed class EfOrderStore(MoynaPayDbContext db) : IOrderStore
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
 
         return rows;
+    }
+
+    public async Task RecordCallAttemptAsync(Guid merchantId, Guid orderId, DateTimeOffset at,
+        CancellationToken ct = default)
+    {
+        var updated = await db.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+             UPDATE orders.orders
+             SET call_attempts = call_attempts + 1,
+                 last_call_attempt_at = {at},
+                 next_call_attempt_at = NULL,
+                 updated_at = {at},
+                 row_version = row_version + 1
+             WHERE id = {orderId}
+               AND tenant_id = {merchantId}
+               AND is_deleted = false
+             """, ct).ConfigureAwait(false);
+
+        if (updated == 0) return;
+
+        db.ChangeTracker.Clear();
+        var order = await FindByIdAsync(merchantId, orderId, ct).ConfigureAwait(false);
+        if (order is null) return;
+
+        db.OrderEvents.Add(new OrderEvent
+        {
+            TenantId = merchantId,
+            OrderId = order.Id,
+            Type = "call.attempted",
+            Actor = Actor.Machine,
+            From = order.Status,
+            To = order.Status,
+            Detail = order.CallAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            At = at,
+        });
+
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+    }
+
+    public async Task ScheduleNextCallAsync(Guid merchantId, Guid orderId,
+        DateTimeOffset nextAttemptAt, DateTimeOffset scheduledAt, string reason,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+
+        var calling = OrderStatus.Calling.ToString();
+        var updated = await db.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+             UPDATE orders.orders
+             SET status = {calling},
+                 reason = {reason},
+                 next_call_attempt_at = {nextAttemptAt},
+                 claimed_by = NULL,
+                 claimed_until = NULL,
+                 updated_at = {scheduledAt},
+                 row_version = row_version + 1
+             WHERE id = {orderId}
+               AND tenant_id = {merchantId}
+               AND is_deleted = false
+             """, ct).ConfigureAwait(false);
+
+        if (updated == 0) return;
+
+        db.OrderEvents.Add(new OrderEvent
+        {
+            TenantId = merchantId,
+            OrderId = orderId,
+            Type = "call.retry_scheduled",
+            Actor = Actor.Machine,
+            From = OrderStatus.Calling,
+            To = OrderStatus.Calling,
+            Detail = reason,
+            At = scheduledAt,
+        });
+
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
     }
 
     /// <summary>

@@ -191,6 +191,7 @@ internal sealed class VoiceWorker(
     IServiceScopeFactory scopes,
     VoiceHealth health,
     IConfiguration configuration,
+    IClock clock,
     ILogger<VoiceWorker> log) : BackgroundService
 {
     /// <summary>The conversation in progress on each channel.</summary>
@@ -302,7 +303,7 @@ internal sealed class VoiceWorker(
 
     private async Task ClaimAndDialAsync(int maxPerPass, TimeSpan leaseFor, CancellationToken ct)
     {
-        var now = DateTimeOffset.UtcNow;
+        var now = clock.UtcNow;
         var claimedBy = $"{_workerId}-{Guid.NewGuid():N}";
         var due = await orders.ClaimDueCallsAsync(
             claimedBy, maxPerPass, now, now.Add(leaseFor), ct).ConfigureAwait(false);
@@ -324,6 +325,12 @@ internal sealed class VoiceWorker(
                     channelId,
                     CallerId(),
                     EndpointFor(claim.Order),
+                    ct).ConfigureAwait(false);
+
+                await orders.RecordCallAttemptAsync(
+                    claim.Order.TenantId,
+                    claim.Order.Id,
+                    clock.UtcNow,
                     ct).ConfigureAwait(false);
 
                 log.LogInformation(
@@ -588,7 +595,7 @@ internal sealed class VoiceWorker(
         if (evt.ChannelId is null) return;
         if (!calls.TryGetByChannel(evt.ChannelId, out var call)) return;
 
-        var press = keypresses.Press(evt.ChannelId, evt.Read("digit"), Script, DateTimeOffset.UtcNow);
+        var press = keypresses.Press(evt.ChannelId, evt.Read("digit"), Script, clock.UtcNow);
 
         switch (press.Outcome)
         {
@@ -623,6 +630,13 @@ internal sealed class VoiceWorker(
     private async Task ApplyOutcomeAsync(OutboundCall call, CallOutcome? outcome, CancellationToken ct)
     {
         var final = outcome ?? CallOutcome.NoAnswer;
+
+        if ((final is CallOutcome.NoAnswer or CallOutcome.Failed or CallOutcome.Unreachable)
+            && await ScheduleRetryAsync(call, final, ct).ConfigureAwait(false))
+        {
+            return;
+        }
+
         var target = OrderLifecycle.FromCallOutcome(final);
 
         await using var scope = scopes.CreateAsyncScope();
@@ -659,9 +673,44 @@ internal sealed class VoiceWorker(
         }
     }
 
+    private async Task<bool> ScheduleRetryAsync(OutboundCall call, CallOutcome outcome, CancellationToken ct)
+    {
+        var order = await orders
+            .FindByIdAsync(call.MerchantId, call.OrderId, ct).ConfigureAwait(false);
+
+        if (order is null) return false;
+
+        var now = clock.UtcNow;
+        var next = new RedialPolicy().NextAttemptAt(
+            order.CallAttempts,
+            order.LastCallAttemptAt,
+            new CallingHours(),
+            now);
+
+        if (next is null) return false;
+
+        var reason = outcome == CallOutcome.NoAnswer
+            ? "call ended with no keypress"
+            : $"call ended as {outcome}";
+
+        await orders.ScheduleNextCallAsync(
+            call.MerchantId,
+            call.OrderId,
+            next.Value,
+            now,
+            reason,
+            ct).ConfigureAwait(false);
+
+        log.LogInformation(
+            "Call {CallSessionId} for order {OrderId} scheduled retry {NextAttemptAt}",
+            call.CallSessionId, call.OrderId, next.Value);
+
+        return true;
+    }
+
     private void Sweep()
     {
-        foreach (var call in calls.Sweep(DateTimeOffset.UtcNow, Abandoned))
+        foreach (var call in calls.Sweep(clock.UtcNow, Abandoned))
         {
             log.LogWarning(
                 "Call {CallSessionId} for order {OrderId} was placed and never seen; forgetting it",

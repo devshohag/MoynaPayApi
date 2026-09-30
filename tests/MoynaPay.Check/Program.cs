@@ -2051,6 +2051,71 @@ await CheckAsync("a received order claimed for calling does not count as an atte
         && callEvent.To == OrderStatus.Calling;
 });
 
+await CheckAsync("a placed call records one attempt and the attempt time", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "CALL-5", OrderStatus.Calling, now);
+    var store = new MemoryOrderStore(db);
+
+    await store.RecordCallAttemptAsync(merchantId, order.Id, now.AddMinutes(1));
+    var current = db.Orders[order.Id];
+    var callEvent = db.Events.Single(e => e.OrderId == order.Id && e.Type == "call.attempted");
+
+    return current.CallAttempts == 1
+        && current.LastCallAttemptAt == now.AddMinutes(1)
+        && current.NextCallAttemptAt is null
+        && callEvent.Detail == "1";
+});
+
+await CheckAsync("a retry is not claimed before the redial gap has passed", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "CALL-6", OrderStatus.Calling, now);
+    var store = new MemoryOrderStore(db);
+
+    await store.RecordCallAttemptAsync(merchantId, order.Id, now);
+    var next = new RedialPolicy().NextAttemptAt(
+        db.Orders[order.Id].CallAttempts,
+        db.Orders[order.Id].LastCallAttemptAt,
+        new CallingHours(),
+        now.AddMinutes(1));
+    await store.ScheduleNextCallAsync(
+        merchantId, order.Id, next!.Value, now.AddMinutes(1), "call ended with no keypress");
+
+    var early = await store.ClaimDueCallsAsync("dial-a", 10, now.AddMinutes(19), now.AddMinutes(24));
+    var due = await store.ClaimDueCallsAsync("dial-b", 10, now.AddMinutes(20), now.AddMinutes(25));
+
+    return early.Count == 0
+        && due.Single().Order.Id == order.Id
+        && db.Orders[order.Id].NextCallAttemptAt == next;
+});
+
+Check("attempts stop at the maximum and land in review, never rejected", () =>
+{
+    var policy = new RedialPolicy();
+    var last = now.AddHours(-1);
+    var next = policy.NextAttemptAt(policy.MaxAttempts, last, new CallingHours(), now);
+    var target = OrderLifecycle.FromCallOutcome(CallOutcome.NoAnswer);
+
+    return next is null
+        && target == OrderStatus.NeedsHuman
+        && target != OrderStatus.Rejected;
+});
+
+Check("a redial scheduled outside the window waits for the morning", () =>
+{
+    var hours = new CallingHours();
+    var policy = new RedialPolicy();
+    var lastAttempt = new DateTimeOffset(2026, 9, 28, 20, 30, 0, CallingHours.DhakaOffset);
+    var nowLate = new DateTimeOffset(2026, 9, 28, 20, 35, 0, CallingHours.DhakaOffset);
+
+    var next = policy.NextAttemptAt(2, lastAttempt, hours, nowLate);
+
+    return next is { } n
+        && n.ToOffset(CallingHours.DhakaOffset).Hour == 9
+        && n.ToOffset(CallingHours.DhakaOffset).Day == 29;
+});
+
 // ---------------------------------------------------------------------------
 // Signing
 // ---------------------------------------------------------------------------

@@ -86,6 +86,8 @@ public class Order : BaseEntity
     public string? Reason { get; set; }
 
     public int CallAttempts { get; set; }
+    public DateTimeOffset? LastCallAttemptAt { get; set; }
+    public DateTimeOffset? NextCallAttemptAt { get; set; }
     public decimal? PaidAmount { get; set; }
     public string? TrxId { get; set; }
     public string? Courier { get; set; }

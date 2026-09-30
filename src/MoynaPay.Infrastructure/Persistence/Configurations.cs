@@ -255,6 +255,9 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<Order>
 
         // The list screen and the review queue: what is open, oldest first.
         builder.HasIndex(x => new { x.TenantId, x.Status, x.CreatedAt });
+
+        // What the dialler asks every pass: open call orders whose retry time has arrived.
+        builder.HasIndex(x => new { x.TenantId, x.Status, x.NextCallAttemptAt });
     }
 }
 

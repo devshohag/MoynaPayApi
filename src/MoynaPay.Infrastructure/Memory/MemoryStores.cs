@@ -306,9 +306,82 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
         bool IsDue(Order order) =>
             !order.IsDeleted
             && order.Status is OrderStatus.Received or OrderStatus.Calling
+            && (order.NextCallAttemptAt is null || order.NextCallAttemptAt <= now)
             && (!order.IsClaimed(now) || string.Equals(order.ClaimedBy, claimedBy, StringComparison.Ordinal))
             && db.Subscriptions.TryGetValue(order.TenantId, out var subscription)
             && subscription.Calls;
+    }
+
+    public Task RecordCallAttemptAsync(Guid merchantId, Guid orderId, DateTimeOffset at,
+        CancellationToken ct = default)
+    {
+        lock (db.Gate)
+        {
+            if (!db.Orders.TryGetValue(orderId, out var order)
+                || order.TenantId != merchantId
+                || order.IsDeleted)
+            {
+                return Task.CompletedTask;
+            }
+
+            order.CallAttempts++;
+            order.LastCallAttemptAt = at;
+            order.NextCallAttemptAt = null;
+            order.UpdatedAt = at;
+            db.Orders[order.Id] = order;
+
+            db.Events.Add(new OrderEvent
+            {
+                TenantId = merchantId,
+                OrderId = order.Id,
+                Type = "call.attempted",
+                Actor = Actor.Machine,
+                From = order.Status,
+                To = order.Status,
+                Detail = order.CallAttempts.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                At = at,
+            });
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task ScheduleNextCallAsync(Guid merchantId, Guid orderId, DateTimeOffset nextAttemptAt,
+        DateTimeOffset scheduledAt, string reason, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+
+        lock (db.Gate)
+        {
+            if (!db.Orders.TryGetValue(orderId, out var order)
+                || order.TenantId != merchantId
+                || order.IsDeleted)
+            {
+                return Task.CompletedTask;
+            }
+
+            order.Status = OrderStatus.Calling;
+            order.Reason = reason;
+            order.NextCallAttemptAt = nextAttemptAt;
+            order.ClaimedBy = null;
+            order.ClaimedUntil = null;
+            order.UpdatedAt = scheduledAt;
+            db.Orders[order.Id] = order;
+
+            db.Events.Add(new OrderEvent
+            {
+                TenantId = merchantId,
+                OrderId = order.Id,
+                Type = "call.retry_scheduled",
+                Actor = Actor.Machine,
+                From = OrderStatus.Calling,
+                To = OrderStatus.Calling,
+                Detail = reason,
+                At = scheduledAt,
+            });
+        }
+
+        return Task.CompletedTask;
     }
 
     public Task<ReviewClaimStoreResult> TryClaimReviewAsync(Guid merchantId, Guid orderId,

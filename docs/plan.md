@@ -227,7 +227,14 @@ order, lease expiry after a dead dialler, and Confirmed/Rejected orders never be
 dialled. Attempt counting is deliberately left for phase 24, so a claim or crashed
 originate does not spend an attempt before retry policy exists.
 
-## Phase 24: Retry policy + attempt accounting [PARTIAL]
+## Phase 24: Retry policy + attempt accounting [DONE]
+Done: call attempts are recorded only after ARI accepts the originate, with
+LastCallAttemptAt and NextCallAttemptAt persisted on the order. No-answer outcomes use
+the existing RedialPolicy and CallingHours: first attempt has no delay, the second waits
+20 minutes, the third waits 2 hours and is pushed to the next calling window if needed.
+After the maximum attempts the order goes to NeedsHuman, never Rejected. A migration adds
+the retry timestamp columns and the dialler due index. Checks cover attempt stamping,
+gap gating, max-attempt handoff, and redials outside the window waiting until morning.
 Existing: RedialPolicy in CallRules.cs.
 - Record every attempt; retry per policy; after the last attempt → NeedsHuman, never rejected.
 

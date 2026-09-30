@@ -335,6 +335,12 @@ public interface IOrderStore
         string claimedBy, int max, DateTimeOffset now, DateTimeOffset leaseUntil,
         CancellationToken ct = default);
 
+    Task RecordCallAttemptAsync(Guid merchantId, Guid orderId, DateTimeOffset at,
+        CancellationToken ct = default);
+
+    Task ScheduleNextCallAsync(Guid merchantId, Guid orderId, DateTimeOffset nextAttemptAt,
+        DateTimeOffset scheduledAt, string reason, CancellationToken ct = default);
+
     Task<ReviewClaimStoreResult> TryClaimReviewAsync(Guid merchantId, Guid orderId,
         string reviewer, DateTimeOffset now, TimeSpan claimFor, CancellationToken ct = default);
 
