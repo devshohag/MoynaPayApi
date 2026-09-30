@@ -331,6 +331,10 @@ public interface IOrderStore
 
     Task SaveAuditAsync(Order order, OrderEvent audit, CancellationToken ct = default);
 
+    Task<IReadOnlyList<OrderCallClaim>> ClaimDueCallsAsync(
+        string claimedBy, int max, DateTimeOffset now, DateTimeOffset leaseUntil,
+        CancellationToken ct = default);
+
     Task<ReviewClaimStoreResult> TryClaimReviewAsync(Guid merchantId, Guid orderId,
         string reviewer, DateTimeOffset now, TimeSpan claimFor, CancellationToken ct = default);
 
@@ -364,6 +368,8 @@ public sealed record HomeMetrics(
     DateTimeOffset AsOf,
     HomeMetricWindow Today,
     HomeMetricWindow SevenDays);
+
+public sealed record OrderCallClaim(Order Order, string ShopName);
 
 public interface IInvoiceStore
 {

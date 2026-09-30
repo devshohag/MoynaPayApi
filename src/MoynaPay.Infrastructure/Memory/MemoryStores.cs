@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.Abstractions;
+using MoynaPay.Application.Voice;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
 using MoynaPay.Domain.Payments;
@@ -245,6 +246,70 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
         }
 
         return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<OrderCallClaim>> ClaimDueCallsAsync(
+        string claimedBy, int max, DateTimeOffset now, DateTimeOffset leaseUntil,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(claimedBy);
+
+        var take = Math.Clamp(max, 1, 100);
+        var hours = new CallingHours();
+
+        if (!hours.IsOpen(now))
+        {
+            return Task.FromResult<IReadOnlyList<OrderCallClaim>>([]);
+        }
+
+        lock (db.Gate)
+        {
+            var claims = new List<OrderCallClaim>(take);
+
+            foreach (var order in db.Orders.Values
+                         .Where(IsDue)
+                         .OrderBy(o => o.CreatedAt)
+                         .Take(take))
+            {
+                if (!db.Merchants.TryGetValue(order.TenantId, out var merchant)
+                    || merchant.IsDeleted)
+                {
+                    continue;
+                }
+
+                var from = order.Status;
+
+                order.Status = OrderStatus.Calling;
+                order.CallAttempts++;
+                order.ClaimedBy = claimedBy;
+                order.ClaimedUntil = leaseUntil;
+                order.UpdatedAt = now;
+                db.Orders[order.Id] = order;
+
+                db.Events.Add(new OrderEvent
+                {
+                    TenantId = order.TenantId,
+                    OrderId = order.Id,
+                    Type = "call.claimed",
+                    Actor = Actor.Machine,
+                    From = from,
+                    To = OrderStatus.Calling,
+                    Detail = claimedBy,
+                    At = now,
+                });
+
+                claims.Add(new OrderCallClaim(order, merchant.Name));
+            }
+
+            return Task.FromResult<IReadOnlyList<OrderCallClaim>>(claims);
+        }
+
+        bool IsDue(Order order) =>
+            !order.IsDeleted
+            && order.Status is OrderStatus.Received or OrderStatus.Calling
+            && (!order.IsClaimed(now) || string.Equals(order.ClaimedBy, claimedBy, StringComparison.Ordinal))
+            && db.Subscriptions.TryGetValue(order.TenantId, out var subscription)
+            && subscription.Calls;
     }
 
     public Task<ReviewClaimStoreResult> TryClaimReviewAsync(Guid merchantId, Guid orderId,

@@ -218,9 +218,13 @@ Existing: CallScript and ScriptRenderer in CallRules.cs.
 ## Phase 22: TTS (Gemini) + cache + 8 kHz resample
 - Gemini TTS behind the existing AI abstractions; cache rendered prompts; resample to 8 kHz slin for Asterisk.
 
-## Phase 23: Dialler loop + calling window [PARTIAL]
-Existing: CallingHours in CallRules.cs.
-- Voice worker picks due orders, respects each merchant's hours and time zone, limits concurrency.
+## Phase 23: Dialler loop + calling window [DONE]
+Done: voice worker now runs a dialler loop that atomically claims due call orders with a
+lease, respects the existing 09:00-21:00 Dhaka calling window even on a UTC server,
+registers the channel correlation before ARI originate, and lets expired claims be taken
+by another worker. Checks cover outside-hours refusal, two diallers not taking the same
+order, lease expiry after a dead dialler, and Confirmed/Rejected orders never being
+dialled.
 
 ## Phase 24: Retry policy + attempt accounting [PARTIAL]
 Existing: RedialPolicy in CallRules.cs.

@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using MoynaPay.Application.Abstractions;
+using MoynaPay.Application.Voice;
 using MoynaPay.Domain.Orders;
 
 namespace MoynaPay.Infrastructure.Persistence;
@@ -73,6 +74,75 @@ public sealed class EfOrderStore(MoynaPayDbContext db) : IOrderStore
         db.OrderEvents.Add(audit);
 
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<OrderCallClaim>> ClaimDueCallsAsync(
+        string claimedBy, int max, DateTimeOffset now, DateTimeOffset leaseUntil,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(claimedBy);
+
+        var hours = new CallingHours();
+        if (!hours.IsOpen(now)) return [];
+
+        var take = Math.Clamp(max, 1, 100);
+        var received = OrderStatus.Received.ToString();
+        var calling = OrderStatus.Calling.ToString();
+
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+             UPDATE orders.orders o
+             SET status = {calling}, call_attempts = o.call_attempts + 1,
+                 claimed_by = {claimedBy}, claimed_until = {leaseUntil},
+                 updated_at = {now}, row_version = o.row_version + 1
+             WHERE o.id IN (
+                 SELECT candidate.id
+                 FROM orders.orders candidate
+                 INNER JOIN merchants.subscriptions s
+                    ON s.tenant_id = candidate.tenant_id
+                   AND s.is_deleted = false
+                   AND s.calls = true
+                 INNER JOIN merchants.merchants m
+                    ON m.id = candidate.tenant_id
+                   AND m.is_deleted = false
+                 WHERE candidate.is_deleted = false
+                   AND candidate.status IN ({received}, {calling})
+                   AND (candidate.claimed_until IS NULL OR candidate.claimed_until <= {now})
+                 ORDER BY candidate.created_at
+                 LIMIT {take}
+                 FOR UPDATE SKIP LOCKED)
+             """, ct).ConfigureAwait(false);
+
+        db.ChangeTracker.Clear();
+
+        var rows = await db.Orders.AsNoTracking()
+            .Where(o => o.ClaimedBy == claimedBy)
+            .Join(db.Merchants.AsNoTracking(),
+                order => order.TenantId,
+                merchant => merchant.Id,
+                (order, merchant) => new OrderCallClaim(order, merchant.Name))
+            .OrderBy(c => c.Order.CreatedAt)
+            .ToListAsync(ct)
+            .ConfigureAwait(false);
+
+        foreach (var claim in rows)
+        {
+            db.OrderEvents.Add(new OrderEvent
+            {
+                TenantId = claim.Order.TenantId,
+                OrderId = claim.Order.Id,
+                Type = "call.claimed",
+                Actor = Actor.Machine,
+                From = claim.Order.Status,
+                To = OrderStatus.Calling,
+                Detail = claimedBy,
+                At = now,
+            });
+        }
+
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+
+        return rows;
     }
 
     /// <summary>

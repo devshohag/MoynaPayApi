@@ -9,6 +9,7 @@ using MoynaPay.Infrastructure;
 using MoynaPay.Infrastructure.Memory;
 using MoynaPay.Infrastructure.Voice;
 using System.Collections.Concurrent;
+using System.Globalization;
 
 // Rings customers and brings back what they pressed.
 //
@@ -189,6 +190,7 @@ internal sealed class VoiceWorker(
     IOrderStore orders,
     IServiceScopeFactory scopes,
     VoiceHealth health,
+    IConfiguration configuration,
     ILogger<VoiceWorker> log) : BackgroundService
 {
     /// <summary>The conversation in progress on each channel.</summary>
@@ -222,6 +224,8 @@ internal sealed class VoiceWorker(
     /// </summary>
     private static readonly TimeSpan Abandoned = TimeSpan.FromMinutes(10);
 
+    private readonly string _workerId = $"voice-{Environment.MachineName}-{Guid.NewGuid():N}";
+
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         log.LogInformation("Voice worker started, listening at {Uri}", Redact(stream.BuildUri()));
@@ -238,24 +242,125 @@ internal sealed class VoiceWorker(
             log.LogWarning("ARI sent a frame that did not parse ({Length} bytes)", frame.Length);
 
         using var sweeper = new Timer(_ => Sweep(), null, Abandoned, Abandoned);
+        var dialler = Task.Run(() => DiallerLoopAsync(ct), CancellationToken.None);
 
-        await foreach (var evt in stream.ReadAsync(ct).ConfigureAwait(false))
+        try
+        {
+            await foreach (var evt in stream.ReadAsync(ct).ConfigureAwait(false))
+            {
+                try
+                {
+                    await HandleAsync(evt, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // One event must never end the stream. The alternative is a worker that goes
+                    // quiet on a single odd channel and stops ringing anybody.
+                    log.LogError(ex, "ARI event {Type} failed", evt.Type);
+                }
+
+                health.LiveCalls = calls.Count;
+            }
+        }
+        finally
         {
             try
             {
-                await HandleAsync(evt, ct).ConfigureAwait(false);
+                await dialler.ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (OperationCanceledException)
             {
-                // One event must never end the stream. The alternative is a worker that goes
-                // quiet on a single odd channel and stops ringing anybody.
-                log.LogError(ex, "ARI event {Type} failed", evt.Type);
+                // Host shutdown.
             }
-
-            health.LiveCalls = calls.Count;
         }
 
         log.LogInformation("Voice worker stopped");
+    }
+
+    private async Task DiallerLoopAsync(CancellationToken ct)
+    {
+        var pollEvery = TimeSpan.FromSeconds(Math.Clamp(
+            GetInt("Telephony:Dialler:PollSeconds", 5), 1, 300));
+        var leaseFor = TimeSpan.FromSeconds(Math.Clamp(
+            GetInt("Telephony:Dialler:LeaseSeconds", 300), 30, 1800));
+        var maxPerPass = Math.Clamp(GetInt("Telephony:Dialler:BatchSize", 5), 1, 50);
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await ClaimAndDialAsync(maxPerPass, leaseFor, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                log.LogError(ex, "Dialler pass failed");
+            }
+
+            await Task.Delay(pollEvery, ct).ConfigureAwait(false);
+        }
+    }
+
+    private async Task ClaimAndDialAsync(int maxPerPass, TimeSpan leaseFor, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var claimedBy = $"{_workerId}-{Guid.NewGuid():N}";
+        var due = await orders.ClaimDueCallsAsync(
+            claimedBy, maxPerPass, now, now.Add(leaseFor), ct).ConfigureAwait(false);
+
+        foreach (var claim in due)
+        {
+            var session = Guid.CreateVersion7();
+            var channelId = calls.Register(
+                session,
+                claim.Order.TenantId,
+                claim.Order.Id,
+                claim.ShopName,
+                DateTimeOffset.UtcNow);
+
+            try
+            {
+                await ari.OriginateEndpointAsync(
+                    session,
+                    channelId,
+                    CallerId(),
+                    EndpointFor(claim.Order),
+                    ct).ConfigureAwait(false);
+
+                log.LogInformation(
+                    "Dialler placed call {CallSessionId} for order {OrderId} on channel {ChannelId}",
+                    session, claim.Order.Id, channelId);
+            }
+            catch
+            {
+                calls.Release(session);
+                throw;
+            }
+        }
+    }
+
+    private int GetInt(string key, int fallback) =>
+        int.TryParse(configuration[key], NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+            ? value
+            : fallback;
+
+    private string CallerId() =>
+        configuration["Telephony:CallerId"] ?? "09610000000";
+
+    private string EndpointFor(Order order)
+    {
+        var template = configuration["Telephony:DialEndpointTemplate"];
+        if (!string.IsNullOrWhiteSpace(template))
+        {
+            return template.Replace("{msisdn}", order.Msisdn, StringComparison.Ordinal);
+        }
+
+        if (configuration["Telephony:DevSoftphoneEndpoint"] is { Length: > 0 } dev)
+        {
+            return dev;
+        }
+
+        var trunk = configuration["Telephony:TrunkName"] ?? "bd-trunk";
+        return $"PJSIP/{order.Msisdn}@{trunk}";
     }
 
     private async Task HandleAsync(AriEvent evt, CancellationToken ct)

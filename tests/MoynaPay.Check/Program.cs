@@ -9,6 +9,7 @@ using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Orders;
 using MoynaPay.Application.Security;
+using MoynaPay.Application.Voice;
 using MoynaPay.Application.Workflows;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
@@ -1951,6 +1952,103 @@ await CheckAsync("every move leaves an audit row naming who made it", async () =
         && last.ActorName == "shohag"
         && last.From == OrderStatus.NeedsHuman
         && last.To == OrderStatus.Confirmed;
+});
+
+// ---------------------------------------------------------------------------
+// Phase 23: dialler claims
+// ---------------------------------------------------------------------------
+MemoryDatabase DiallerDb()
+{
+    var db = new MemoryDatabase();
+    db.Merchants[merchantId] = new Merchant
+    {
+        Id = merchantId,
+        TenantId = merchantId,
+        Name = "Dial Shop",
+        Msisdn = "8801711111111",
+        TimeZone = "Asia/Dhaka",
+    };
+    db.Subscriptions[merchantId] = new Subscription
+    {
+        TenantId = merchantId,
+        Calls = true,
+    };
+
+    return db;
+}
+
+await CheckAsync("dialler does not claim outside Dhaka calling hours on a UTC server", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "CALL-1", OrderStatus.Calling, now);
+    var store = new MemoryOrderStore(db);
+    var twoAmDhaka = new DateTimeOffset(2026, 9, 28, 20, 0, 0, TimeSpan.Zero);
+
+    var claimed = await store.ClaimDueCallsAsync(
+        "dial-a", 10, twoAmDhaka, twoAmDhaka.AddMinutes(5));
+
+    return claimed.Count == 0
+        && db.Orders[order.Id].CallAttempts == 0
+        && db.Orders[order.Id].ClaimedBy is null;
+});
+
+await CheckAsync("two diallers never claim the same order", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "CALL-2", OrderStatus.Calling, now);
+    var store = new MemoryOrderStore(db);
+
+    var first = await store.ClaimDueCallsAsync("dial-a", 10, now, now.AddMinutes(5));
+    var second = await store.ClaimDueCallsAsync("dial-b", 10, now.AddSeconds(1), now.AddMinutes(6));
+
+    return first.Single().Order.Id == order.Id
+        && second.Count == 0
+        && db.Orders[order.Id].CallAttempts == 1
+        && db.Orders[order.Id].ClaimedBy == "dial-a";
+});
+
+await CheckAsync("a dead dialler's call claim expires", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "CALL-3", OrderStatus.Calling, now);
+    var store = new MemoryOrderStore(db);
+
+    await store.ClaimDueCallsAsync("dial-a", 10, now, now.AddMinutes(1));
+    var reclaimed = await store.ClaimDueCallsAsync("dial-b", 10, now.AddMinutes(2), now.AddMinutes(7));
+
+    return reclaimed.Single().Order.Id == order.Id
+        && db.Orders[order.Id].CallAttempts == 2
+        && db.Orders[order.Id].ClaimedBy == "dial-b";
+});
+
+await CheckAsync("confirmed and rejected orders are never dialled", async () =>
+{
+    var db = DiallerDb();
+    AddOrder(db, "CALL-CONFIRMED", OrderStatus.Confirmed, now);
+    AddOrder(db, "CALL-REJECTED", OrderStatus.Rejected, now);
+    var due = AddOrder(db, "CALL-DUE", OrderStatus.Calling, now);
+    var store = new MemoryOrderStore(db);
+
+    var claimed = await store.ClaimDueCallsAsync("dial-a", 10, now, now.AddMinutes(5));
+
+    return claimed.Count == 1 && claimed[0].Order.Id == due.Id;
+});
+
+await CheckAsync("a received order claimed for calling records one attempt", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "CALL-4", OrderStatus.Received, now);
+    var store = new MemoryOrderStore(db);
+
+    var claimed = await store.ClaimDueCallsAsync("dial-a", 10, now, now.AddMinutes(5));
+    var current = db.Orders[order.Id];
+    var callEvent = db.Events.Single(e => e.OrderId == order.Id && e.Type == "call.claimed");
+
+    return claimed.Single().Order.Id == order.Id
+        && current.Status == OrderStatus.Calling
+        && current.CallAttempts == 1
+        && callEvent.From == OrderStatus.Received
+        && callEvent.To == OrderStatus.Calling;
 });
 
 // ---------------------------------------------------------------------------
