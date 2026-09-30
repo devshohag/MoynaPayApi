@@ -1,6 +1,11 @@
+using System.Buffers.Binary;
+using Microsoft.Extensions.Configuration;
+using MoynaPay.Application.Voice.Media;
+using MoynaPay.Application.Voice.Speech;
 using MoynaPay.Application.Voice;
 using MoynaPay.Application.Voice.Ari;
 using MoynaPay.Domain.Orders;
+using MoynaPay.Infrastructure.Voice;
 
 namespace MoynaPay.Check;
 
@@ -24,6 +29,184 @@ internal static class Telephony
         Reconnect(check);
         Keypresses(check);
         Conversation(check);
+        Speech(check);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 22: turning the script into audio
+    // -----------------------------------------------------------------------
+    private static void Speech(Action<string, Func<bool>> check)
+    {
+        static byte[] Tone(int samples, int periodSamples, short amplitude = 8000)
+        {
+            var payload = new byte[samples * 2];
+            for (var i = 0; i < samples; i++)
+            {
+                var value = (short)(amplitude * Math.Sin(2 * Math.PI * i / periodSamples));
+                BinaryPrimitives.WriteInt16LittleEndian(payload.AsSpan(i * 2), value);
+            }
+
+            return payload;
+        }
+
+        static string TempSounds()
+        {
+            var path = Path.Combine(Path.GetTempPath(), "moynapay-checks", Guid.CreateVersion7().ToString("N"));
+            Directory.CreateDirectory(path);
+            return path;
+        }
+
+        check("24 kHz Gemini audio resamples to 8 kHz", () =>
+        {
+            var input = Tone(240, 24);
+            var output = AudioResampler.Convert(input, AudioFormat.Gemini24k, AudioFormat.Telephony8k);
+
+            return output.Length == 160;
+        });
+
+        check("the ported resampler keeps duration across 24 kHz to 8 kHz", () =>
+        {
+            var input = Tone(480, 24);
+            var before = AudioFormat.Gemini24k.DurationOf(input.Length);
+            var output = AudioResampler.Convert(input, AudioFormat.Gemini24k, AudioFormat.Telephony8k);
+            var after = AudioFormat.Telephony8k.DurationOf(output.Length);
+
+            return Math.Abs(before.TotalMilliseconds - after.TotalMilliseconds) < 1;
+        });
+
+        check("the same prompt hits the cache and calls Gemini once", () =>
+        {
+            var path = TempSounds();
+            try
+            {
+                var synth = new FakeSynthesizer(Tone(240, 24));
+                var voice = new CachedPromptVoice(
+                    synth,
+                    new TtsOptions("key", "model-a", "voice-a", path));
+
+                var first = voice.MediaForAsync("hello").GetAwaiter().GetResult();
+                var second = voice.MediaForAsync("hello").GetAwaiter().GetResult();
+
+                return first == second
+                    && synth.Calls == 1
+                    && File.Exists(Path.Combine(path, first["sound:custom/".Length..] + ".wav"));
+            }
+            finally
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        });
+
+        check("a changed word changes the cache key", () =>
+        {
+            var voice = new CachedPromptVoice(
+                new FakeSynthesizer(Tone(240, 24)),
+                new TtsOptions("key", "model-a", "voice-a", Path.GetTempPath()));
+
+            return voice.FileStem("confirm this order") != voice.FileStem("confirm that order");
+        });
+
+        check("model and voice are part of the cache key", () =>
+        {
+            var synth = new FakeSynthesizer(Tone(240, 24));
+            var first = new CachedPromptVoice(synth, new TtsOptions("key", "model-a", "voice-a", Path.GetTempPath()));
+            var second = new CachedPromptVoice(synth, new TtsOptions("key", "model-b", "voice-a", Path.GetTempPath()));
+            var third = new CachedPromptVoice(synth, new TtsOptions("key", "model-a", "voice-b", Path.GetTempPath()));
+
+            return first.FileStem("same text") != second.FileStem("same text")
+                && first.FileStem("same text") != third.FileStem("same text");
+        });
+
+        check("cache filenames contain no prompt text and cannot escape the sound directory", () =>
+        {
+            var customer = "Customer ../secret";
+            var path = TempSounds();
+            try
+            {
+                var voice = new CachedPromptVoice(
+                    new FakeSynthesizer(Tone(240, 24)),
+                    new TtsOptions("key", "model-a", "voice-a", path));
+
+                var media = voice.MediaForAsync(customer).GetAwaiter().GetResult();
+                var stem = media["sound:custom/".Length..];
+                var full = Path.GetFullPath(Path.Combine(path, stem + ".wav"));
+                var root = Path.GetFullPath(path) + Path.DirectorySeparatorChar;
+
+                return media.StartsWith("sound:custom/moynapay-", StringComparison.Ordinal)
+                    && !stem.Contains("Customer", StringComparison.OrdinalIgnoreCase)
+                    && !stem.Contains("secret", StringComparison.OrdinalIgnoreCase)
+                    && !stem.Contains('.', StringComparison.Ordinal)
+                    && full.StartsWith(root, StringComparison.Ordinal);
+            }
+            finally
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        });
+
+        check("cached prompts are written as 8 kHz 16-bit mono WAV", () =>
+        {
+            var path = TempSounds();
+            try
+            {
+                var voice = new CachedPromptVoice(
+                    new FakeSynthesizer(Tone(240, 24)),
+                    new TtsOptions("key", "model-a", "voice-a", path));
+
+                var media = voice.MediaForAsync("listen").GetAwaiter().GetResult();
+                var wav = File.ReadAllBytes(Path.Combine(path, media["sound:custom/".Length..] + ".wav"));
+                var (pcm, format) = WavPcm.Read(wav);
+
+                return format == AudioFormat.Telephony8k && pcm.Length == 160;
+            }
+            finally
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        });
+
+        check("TTS refuses to start outside development without a key, model and voice", () =>
+        {
+            try
+            {
+                TtsOptions.FromConfiguration(EmptyConfiguration(), isDevelopment: false);
+                return false;
+            }
+            catch (InvalidOperationException)
+            {
+                return true;
+            }
+        });
+
+        check("TTS has no fake production defaults for model or voice", () =>
+        {
+            var options = TtsOptions.FromConfiguration(EmptyConfiguration(), isDevelopment: true);
+
+            return options.ApiKey == ""
+                && options.Model == ""
+                && options.Voice == ""
+                && options.SoundsPath == TtsOptions.DefaultSoundsPath;
+        });
+
+        check("TTS reads every production setting from configuration", () =>
+        {
+            var options = TtsOptions.FromConfiguration(new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["MoynaPay:Gemini:ApiKey"] = "secret",
+                    ["Telephony:Tts:Model"] = "configured-model",
+                    ["Telephony:Tts:Voice"] = "configured-voice",
+                    ["Telephony:SoundsPath"] = "/shared/sounds/custom",
+                })
+                .Build(), isDevelopment: false);
+
+            return options.ApiKey == "secret"
+                && options.Model == "configured-model"
+                && options.Voice == "configured-voice"
+                && options.SoundsPath == "/shared/sounds/custom";
+        });
+
+        static IConfiguration EmptyConfiguration() => new ConfigurationBuilder().Build();
     }
 
     // -----------------------------------------------------------------------
@@ -609,5 +792,24 @@ internal static class Telephony
 
         check("never connecting does not reset it", () =>
             !AriReconnect.ResetsBackoff(wasConnected: false, TimeSpan.FromHours(1)));
+    }
+
+    private sealed class FakeSynthesizer(byte[] payload) : IStreamingSpeechSynthesizer
+    {
+        public int Calls { get; private set; }
+
+        public string ProviderName => "fake-gemini";
+
+        public AudioFormat OutputFormat => AudioFormat.Gemini24k;
+
+        public async IAsyncEnumerable<AudioFrame> SynthesizeAsync(
+            string text,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            Calls++;
+            await Task.Yield();
+            ct.ThrowIfCancellationRequested();
+            yield return new AudioFrame(payload, OutputFormat, Calls, DateTimeOffset.UtcNow);
+        }
     }
 }
