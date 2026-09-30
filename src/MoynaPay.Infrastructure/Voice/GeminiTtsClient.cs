@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using MoynaPay.Application.Voice.Media;
 using MoynaPay.Application.Voice.Speech;
@@ -50,7 +51,7 @@ public sealed class GeminiTtsClient(HttpClient http, TtsOptions options) : IStre
             response_format = new
             {
                 type = "audio",
-                mime_type = "audio/wav",
+                mime_type = "audio/l16",
                 sample_rate = 24000,
             },
             generation_config = new
@@ -68,43 +69,70 @@ public sealed class GeminiTtsClient(HttpClient http, TtsOptions options) : IStre
         await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         using var json = await JsonDocument.ParseAsync(body, cancellationToken: ct).ConfigureAwait(false);
 
-        var wav = ExtractAudio(json.RootElement);
-        var (pcm, format) = WavPcm.Read(wav);
+        var (pcm, format) = ExtractAudio(json.RootElement);
 
         yield return new AudioFrame(
-            pcm.ToArray(),
+            pcm,
             format,
             0,
             DateTimeOffset.UtcNow);
     }
 
-    private static byte[] ExtractAudio(JsonElement root)
+    public static (byte[] Pcm, AudioFormat Format) ExtractAudio(JsonElement root)
     {
-        if (TryFindAudioData(root, out var base64))
+        if (TryFindAudioData(root, out var audio))
         {
-            return Convert.FromBase64String(base64);
+            var bytes = Convert.FromBase64String(audio.Base64);
+            return DecodeAudio(bytes, audio.MimeType);
         }
 
         throw new InvalidOperationException("Gemini returned no audio data.");
     }
 
-    private static bool TryFindAudioData(JsonElement element, out string base64)
+    private static (byte[] Pcm, AudioFormat Format) DecodeAudio(byte[] bytes, string? mimeType)
     {
-        base64 = "";
+        if (mimeType?.StartsWith("audio/wav", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            var (pcm, format) = WavPcm.Read(bytes);
+            return (pcm.ToArray(), format);
+        }
+
+        return (bytes, FormatFromMimeType(mimeType));
+    }
+
+    private static AudioFormat FormatFromMimeType(string? mimeType)
+    {
+        if (string.IsNullOrWhiteSpace(mimeType)
+            || !mimeType.StartsWith("audio/l16", StringComparison.OrdinalIgnoreCase))
+        {
+            return AudioFormat.Gemini24k;
+        }
+
+        var rate = 24000;
+        var match = Regex.Match(mimeType, @"(?:rate|sample_rate)\s*=\s*(\d+)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (match.Success && int.TryParse(match.Groups[1].Value, out var parsed))
+        {
+            rate = parsed;
+        }
+
+        return new AudioFormat(AudioEncoding.Slin16, rate, 1);
+    }
+
+    private static bool TryFindAudioData(JsonElement element, out (string Base64, string? MimeType) audio)
+    {
+        audio = default;
 
         if (element.ValueKind == JsonValueKind.Object)
         {
-            if (LooksLikeAudioObject(element)
-                && element.TryGetProperty("data", out var data)
-                && data.ValueKind == JsonValueKind.String)
+            if (TryReadAudioObject(element, out audio))
             {
-                base64 = data.GetString() ?? "";
-                return !string.IsNullOrWhiteSpace(base64);
+                return true;
             }
 
             foreach (var property in element.EnumerateObject())
             {
-                if (TryFindAudioData(property.Value, out base64))
+                if (TryFindAudioData(property.Value, out audio))
                 {
                     return true;
                 }
@@ -114,7 +142,7 @@ public sealed class GeminiTtsClient(HttpClient http, TtsOptions options) : IStre
         {
             foreach (var item in element.EnumerateArray())
             {
-                if (TryFindAudioData(item, out base64))
+                if (TryFindAudioData(item, out audio))
                 {
                     return true;
                 }
@@ -122,6 +150,47 @@ public sealed class GeminiTtsClient(HttpClient http, TtsOptions options) : IStre
         }
 
         return false;
+    }
+
+    private static bool TryReadAudioObject(JsonElement element, out (string Base64, string? MimeType) audio)
+    {
+        audio = default;
+
+        var container = element;
+        if (element.TryGetProperty("inlineData", out var inlineData))
+        {
+            container = inlineData;
+        }
+        else if (element.TryGetProperty("inline_data", out var inlineDataSnake))
+        {
+            container = inlineDataSnake;
+        }
+
+        if (!LooksLikeAudioObject(container)
+            || !container.TryGetProperty("data", out var data)
+            || data.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var base64 = data.GetString() ?? "";
+        if (string.IsNullOrWhiteSpace(base64))
+        {
+            return false;
+        }
+
+        audio = (base64, ReadMimeType(container));
+        return true;
+    }
+
+    private static string? ReadMimeType(JsonElement element)
+    {
+        if (element.TryGetProperty("mime_type", out var snake))
+        {
+            return snake.GetString();
+        }
+
+        return element.TryGetProperty("mimeType", out var camel) ? camel.GetString() : null;
     }
 
     private static bool LooksLikeAudioObject(JsonElement element)

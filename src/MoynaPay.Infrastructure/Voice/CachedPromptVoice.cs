@@ -30,13 +30,13 @@ public sealed class CachedPromptVoice(
             await File.WriteAllBytesAsync(temp, wav, ct).ConfigureAwait(false);
             TryMakeReadableByAsterisk(temp);
 
-            if (File.Exists(path))
-            {
-                File.Delete(temp);
-            }
-            else
+            try
             {
                 File.Move(temp, path);
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                File.Delete(temp);
             }
         }
 
@@ -55,7 +55,7 @@ public sealed class CachedPromptVoice(
             text);
 
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(material));
-        return "moynapay-" + Convert.ToHexString(hash)[..24].ToLowerInvariant();
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     private async Task<ReadOnlyMemory<byte>> SynthesizeAsync(string text, CancellationToken ct)

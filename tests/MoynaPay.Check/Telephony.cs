@@ -49,12 +49,38 @@ internal static class Telephony
             return payload;
         }
 
+        static double Energy(ReadOnlyMemory<byte> payload)
+        {
+            double total = 0;
+            for (var i = 0; i < payload.Length / 2; i++)
+            {
+                var sample = BinaryPrimitives.ReadInt16LittleEndian(payload.Span[(i * 2)..]);
+                total += (double)sample * sample;
+            }
+
+            return total / Math.Max(1, payload.Length / 2);
+        }
+
         static string TempSounds()
         {
             var path = Path.Combine(Path.GetTempPath(), "moynapay-checks", Guid.CreateVersion7().ToString("N"));
             Directory.CreateDirectory(path);
             return path;
         }
+
+        check("resampler returns the input when the format already matches", () =>
+        {
+            var payload = Tone(160, 20);
+            var result = AudioResampler.Convert(payload, AudioFormat.Telephony8k, AudioFormat.Telephony8k);
+
+            return result.Span.SequenceEqual(payload);
+        });
+
+        check("resampler doubles the bytes when upsampling 8 kHz to 16 kHz", () =>
+            AudioResampler.Convert(Tone(160, 20), AudioFormat.Telephony8k, AudioFormat.Wide16k).Length == 640);
+
+        check("resampler halves the bytes when downsampling 16 kHz to 8 kHz", () =>
+            AudioResampler.Convert(Tone(320, 40), AudioFormat.Wide16k, AudioFormat.Telephony8k).Length == 320);
 
         check("24 kHz Gemini audio resamples to 8 kHz", () =>
         {
@@ -64,14 +90,91 @@ internal static class Telephony
             return output.Length == 160;
         });
 
-        check("the ported resampler keeps duration across 24 kHz to 8 kHz", () =>
+        check("resampler keeps duration across a conversion", () =>
         {
-            var input = Tone(480, 24);
-            var before = AudioFormat.Gemini24k.DurationOf(input.Length);
-            var output = AudioResampler.Convert(input, AudioFormat.Gemini24k, AudioFormat.Telephony8k);
-            var after = AudioFormat.Telephony8k.DurationOf(output.Length);
+            var input = Tone(160, 20);
+            var before = AudioFormat.Telephony8k.DurationOf(input.Length);
+            var output = AudioResampler.Convert(input, AudioFormat.Telephony8k, AudioFormat.Wide16k);
+            var after = AudioFormat.Wide16k.DurationOf(output.Length);
 
             return Math.Abs(before.TotalMilliseconds - after.TotalMilliseconds) < 1;
+        });
+
+        check("resampler round trip keeps most of the signal energy", () =>
+        {
+            var original = Tone(800, 50);
+            var up = AudioResampler.Convert(original, AudioFormat.Telephony8k, AudioFormat.Wide16k);
+            var down = AudioResampler.Convert(up, AudioFormat.Wide16k, AudioFormat.Telephony8k);
+            var ratio = Energy(down) / Energy(original);
+
+            return down.Length == original.Length && ratio >= 0.8 && ratio <= 1.2;
+        });
+
+        check("resampler keeps silence silent", () =>
+        {
+            var result = AudioResampler.Convert(new byte[320], AudioFormat.Telephony8k, AudioFormat.Wide16k);
+
+            return result.Length == 640 && result.Span.ToArray().All(b => b == 0);
+        });
+
+        check("resampler handles an empty payload", () =>
+            AudioResampler.Convert(ReadOnlyMemory<byte>.Empty,
+                AudioFormat.Telephony8k, AudioFormat.Wide16k).Length == 0);
+
+        check("resampler rejects odd byte counts", () =>
+        {
+            try
+            {
+                AudioResampler.Convert(new byte[321], AudioFormat.Telephony8k, AudioFormat.Wide16k);
+                return false;
+            }
+            catch (ArgumentException)
+            {
+                return true;
+            }
+        });
+
+        check("resampler converts a frame and keeps the sequence number", () =>
+        {
+            var frame = new AudioFrame(Tone(160, 20), AudioFormat.Telephony8k, 42, DateTimeOffset.UtcNow);
+            var converted = AudioResampler.Convert(frame, AudioFormat.Wide16k);
+
+            return converted.Format == AudioFormat.Wide16k
+                && converted.SequenceNumber == 42
+                && Math.Abs(converted.Duration.TotalMilliseconds - 20) < 1;
+        });
+
+        check("Gemini inlineData raw PCM is not treated as a WAV file", () =>
+        {
+            var pcm = Tone(240, 24);
+            var json = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                candidates = new[]
+                {
+                    new
+                    {
+                        content = new
+                        {
+                            parts = new[]
+                            {
+                                new
+                                {
+                                    inlineData = new
+                                    {
+                                        mimeType = "audio/l16;rate=24000",
+                                        data = Convert.ToBase64String(pcm),
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            });
+
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var (read, format) = GeminiTtsClient.ExtractAudio(doc.RootElement);
+
+            return format == AudioFormat.Gemini24k && read.SequenceEqual(pcm);
         });
 
         check("the same prompt hits the cache and calls Gemini once", () =>
@@ -132,7 +235,9 @@ internal static class Telephony
                 var full = Path.GetFullPath(Path.Combine(path, stem + ".wav"));
                 var root = Path.GetFullPath(path) + Path.DirectorySeparatorChar;
 
-                return media.StartsWith("sound:custom/moynapay-", StringComparison.Ordinal)
+                return media.StartsWith("sound:custom/", StringComparison.Ordinal)
+                    && stem.Length == 64
+                    && stem.All(Uri.IsHexDigit)
                     && !stem.Contains("Customer", StringComparison.OrdinalIgnoreCase)
                     && !stem.Contains("secret", StringComparison.OrdinalIgnoreCase)
                     && !stem.Contains('.', StringComparison.Ordinal)
@@ -157,7 +262,60 @@ internal static class Telephony
                 var wav = File.ReadAllBytes(Path.Combine(path, media["sound:custom/".Length..] + ".wav"));
                 var (pcm, format) = WavPcm.Read(wav);
 
-                return format == AudioFormat.Telephony8k && pcm.Length == 160;
+                return wav.AsSpan()[..4].SequenceEqual("RIFF"u8)
+                    && format == AudioFormat.Telephony8k
+                    && pcm.Length == 160;
+            }
+            finally
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        });
+
+        check("a failed synthesis leaves no final or temp cache file", () =>
+        {
+            var path = TempSounds();
+            try
+            {
+                var voice = new CachedPromptVoice(
+                    new FailingSynthesizer(),
+                    new TtsOptions("key", "model-a", "voice-a", path));
+
+                try
+                {
+                    voice.MediaForAsync("will fail").GetAwaiter().GetResult();
+                    return false;
+                }
+                catch (InvalidOperationException)
+                {
+                    return !Directory.EnumerateFiles(path).Any();
+                }
+            }
+            finally
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        });
+
+        check("two cache misses racing leave one final WAV and no temp files", () =>
+        {
+            var path = TempSounds();
+            try
+            {
+                var synth = new SlowSynthesizer(Tone(240, 24));
+                var voice = new CachedPromptVoice(
+                    synth,
+                    new TtsOptions("key", "model-a", "voice-a", path));
+
+                Task.WaitAll(
+                    voice.MediaForAsync("same text"),
+                    voice.MediaForAsync("same text"));
+
+                var files = Directory.EnumerateFiles(path).Select(Path.GetFileName).ToList();
+
+                return files.Count == 1
+                    && files[0]!.EndsWith(".wav", StringComparison.Ordinal)
+                    && !files[0]!.EndsWith(".tmp", StringComparison.Ordinal);
             }
             finally
             {
@@ -810,6 +968,39 @@ internal static class Telephony
             await Task.Yield();
             ct.ThrowIfCancellationRequested();
             yield return new AudioFrame(payload, OutputFormat, Calls, DateTimeOffset.UtcNow);
+        }
+    }
+
+    private sealed class FailingSynthesizer : IStreamingSpeechSynthesizer
+    {
+        public string ProviderName => "failing-gemini";
+
+        public AudioFormat OutputFormat => AudioFormat.Gemini24k;
+
+        public async IAsyncEnumerable<AudioFrame> SynthesizeAsync(
+            string text,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.Yield();
+            throw new InvalidOperationException("synthetic failure");
+#pragma warning disable CS0162
+            yield return new AudioFrame(Array.Empty<byte>(), OutputFormat, 0, DateTimeOffset.UtcNow);
+#pragma warning restore CS0162
+        }
+    }
+
+    private sealed class SlowSynthesizer(byte[] payload) : IStreamingSpeechSynthesizer
+    {
+        public string ProviderName => "slow-gemini";
+
+        public AudioFormat OutputFormat => AudioFormat.Gemini24k;
+
+        public async IAsyncEnumerable<AudioFrame> SynthesizeAsync(
+            string text,
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.Delay(50, ct);
+            yield return new AudioFrame(payload, OutputFormat, 0, DateTimeOffset.UtcNow);
         }
     }
 }
