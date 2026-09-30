@@ -203,6 +203,13 @@ internal sealed class VoiceWorker(
         new(StringComparer.Ordinal);
 
     /// <summary>
+    /// PlaybackFinished names the playback, and not every Asterisk event repeats the
+    /// channel. Remembering who started the playback lets the flow keep moving after audio.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, string> _playbacks =
+        new(StringComparer.Ordinal);
+
+    /// <summary>
     /// The script the keys are read against. Per merchant from phase 21; the defaults are
     /// the ones that matter here - 1 confirms, 0 rejects, 9 asks for a person.
     /// </summary>
@@ -266,6 +273,7 @@ internal sealed class VoiceWorker(
             case AriEvent.StasisEnd:
             case AriEvent.ChannelDestroyed:
                 StopWaiting(evt.ChannelId ?? "");
+                ForgetPlaybacks(evt.ChannelId);
 
                 if (evt.ChannelId is not null && _flows.TryRemove(evt.ChannelId, out var finished))
                 {
@@ -287,9 +295,20 @@ internal sealed class VoiceWorker(
                 break;
 
             case AriEvent.PlaybackFinished:
-                if (evt.ChannelId is not null && _flows.TryGetValue(evt.ChannelId, out var playing))
+                var channelId = evt.ChannelId;
+
+                if (channelId is null && evt.PlaybackId is not null)
                 {
-                    await ActAsync(evt.ChannelId, playing.Said(), ct).ConfigureAwait(false);
+                    _playbacks.TryRemove(evt.PlaybackId, out channelId);
+                }
+                else if (evt.PlaybackId is not null)
+                {
+                    _playbacks.TryRemove(evt.PlaybackId, out _);
+                }
+
+                if (channelId is not null && _flows.TryGetValue(channelId, out var playing))
+                {
+                    await ActAsync(channelId, playing.Said(), ct).ConfigureAwait(false);
                 }
 
                 break;
@@ -383,7 +402,8 @@ internal sealed class VoiceWorker(
         {
             case CallActionKind.Play:
                 var media = await voice.MediaForAsync(action.Say!, ct).ConfigureAwait(false);
-                await ari.PlayAsync(channelId, media, ct).ConfigureAwait(false);
+                var playbackId = await ari.PlayAsync(channelId, media, ct).ConfigureAwait(false);
+                _playbacks[playbackId] = channelId;
                 break;
 
             case CallActionKind.Listen:
@@ -442,6 +462,19 @@ internal sealed class VoiceWorker(
         {
             existing.Cancel();
             existing.Dispose();
+        }
+    }
+
+    private void ForgetPlaybacks(string? channelId)
+    {
+        if (string.IsNullOrEmpty(channelId)) return;
+
+        foreach (var playback in _playbacks)
+        {
+            if (string.Equals(playback.Value, channelId, StringComparison.Ordinal))
+            {
+                _playbacks.TryRemove(playback.Key, out _);
+            }
         }
     }
 
