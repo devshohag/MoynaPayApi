@@ -205,6 +205,19 @@ var now = new DateTimeOffset(2026, 9, 28, 10, 0, 0, TimeSpan.Zero);
     return (h.Db, new OrderWorkflowService(h.Create, h.Move, orders, merchants, sessions, clock), sessions);
 }
 
+(MemoryDatabase Db, CallOutcomeService Outcomes) CallOutcomeHarness(
+    DateTimeOffset? at = null, bool webhook = true)
+{
+    var h = Harness(calls: true, pay: false, webhook: webhook);
+    var orders = new MemoryOrderStore(h.Db);
+    var merchants = new MemoryMerchantStore(h.Db);
+    var sessions = new MemoryWorkflowSessionStore(h.Db);
+    var clock = new FixedClock(at ?? now);
+    var workflow = new OrderWorkflowService(h.Create, h.Move, orders, merchants, sessions, clock);
+
+    return (h.Db, new CallOutcomeService(orders, workflow, clock));
+}
+
 (MemoryDatabase Db, WorkflowActionHandlers Actions, OrderWorkflowService Workflow) ActionHarness(
     bool calls = false, bool pay = true, bool courier = true, bool webhook = true)
 {
@@ -2114,6 +2127,117 @@ Check("a redial scheduled outside the window waits for the morning", () =>
     return next is { } n
         && n.ToOffset(CallingHours.DhakaOffset).Hour == 9
         && n.ToOffset(CallingHours.DhakaOffset).Day == 29;
+});
+
+// ---------------------------------------------------------------------------
+// Phase 25: call outcomes
+// ---------------------------------------------------------------------------
+CallOutcomeCommand Outcome(Guid orderId, Guid callSessionId, CallOutcome? outcome) =>
+    new()
+    {
+        MerchantId = merchantId,
+        OrderId = orderId,
+        CallSessionId = callSessionId,
+        Outcome = outcome,
+    };
+
+await CheckAsync("phase 25: pressing 1 confirms through the order workflow", async () =>
+{
+    var h = CallOutcomeHarness();
+    var order = AddOrder(h.Db, "OUTCOME-1", OrderStatus.Calling, now);
+    var session = Guid.Parse("01929999-0000-7000-8000-000000000251");
+
+    var result = await h.Outcomes.ApplyAsync(Outcome(order.Id, session, CallOutcome.Confirmed));
+    var events = h.Db.Events.Where(e => e.OrderId == order.Id).ToList();
+
+    return result.Kind == CallOutcomeApplyKind.Moved
+        && h.Db.Orders[order.Id].Status == OrderStatus.Confirmed
+        && h.Db.Orders[order.Id].Digit == "1"
+        && events.Any(e => e.Type == "call.ended" && e.Detail == "call ended with keypress")
+        && events.Any(e => e.Type == "order.confirmed")
+        && h.Db.Outbox.Count == 1
+        && h.Db.Outbox[0].EventType == "order.confirmed";
+});
+
+await CheckAsync("phase 25: pressing 0 records the customer's rejection", async () =>
+{
+    var h = CallOutcomeHarness();
+    var order = AddOrder(h.Db, "OUTCOME-0", OrderStatus.Calling, now);
+
+    var result = await h.Outcomes.ApplyAsync(Outcome(
+        order.Id,
+        Guid.Parse("01929999-0000-7000-8000-000000000250"),
+        CallOutcome.Rejected));
+
+    return result.Kind == CallOutcomeApplyKind.Moved
+        && h.Db.Orders[order.Id].Status == OrderStatus.Rejected
+        && h.Db.Orders[order.Id].Digit == "0"
+        && h.Db.Events.Any(e => e.OrderId == order.Id && e.Type == "call.ended")
+        && h.Db.Outbox.Single().EventType == "order.rejected";
+});
+
+await CheckAsync("phase 25: pressing 9 sends the order to a person", async () =>
+{
+    var h = CallOutcomeHarness();
+    var order = AddOrder(h.Db, "OUTCOME-9", OrderStatus.Calling, now);
+
+    var result = await h.Outcomes.ApplyAsync(Outcome(
+        order.Id,
+        Guid.Parse("01929999-0000-7000-8000-000000000259"),
+        CallOutcome.NeedsHuman));
+
+    return result.Kind == CallOutcomeApplyKind.Moved
+        && h.Db.Orders[order.Id].Status == OrderStatus.NeedsHuman
+        && h.Db.Orders[order.Id].Digit == "9"
+        && h.Db.Outbox.Single().EventType == "order.needs_human";
+});
+
+await CheckAsync("phase 25: silence after the last attempt is review, not rejected", async () =>
+{
+    var h = CallOutcomeHarness();
+    var order = AddOrder(h.Db, "OUTCOME-SILENCE", OrderStatus.Calling, now);
+    order.CallAttempts = new RedialPolicy().MaxAttempts;
+    order.LastCallAttemptAt = now.AddHours(-3);
+
+    var result = await h.Outcomes.ApplyAsync(Outcome(
+        order.Id,
+        Guid.Parse("01929999-0000-7000-8000-000000000253"),
+        null));
+
+    return result.Kind == CallOutcomeApplyKind.Moved
+        && h.Db.Orders[order.Id].Status == OrderStatus.NeedsHuman
+        && h.Db.Orders[order.Id].Status != OrderStatus.Rejected
+        && h.Db.Orders[order.Id].Digit is null
+        && h.Db.Events.Any(e => e.OrderId == order.Id
+            && e.Type == "call.ended"
+            && e.Detail == "call ended with no keypress");
+});
+
+await CheckAsync("phase 25: applying the same call outcome twice is silent the second time", async () =>
+{
+    var h = CallOutcomeHarness();
+    var order = AddOrder(h.Db, "OUTCOME-IDEMPOTENT", OrderStatus.Calling, now);
+    var session = Guid.Parse("01929999-0000-7000-8000-000000000255");
+
+    await h.Outcomes.ApplyAsync(Outcome(order.Id, session, CallOutcome.Confirmed));
+    await h.Outcomes.ApplyAsync(Outcome(order.Id, session, CallOutcome.Confirmed));
+
+    return h.Db.Events.Count(e => e.OrderId == order.Id && e.Type == "call.ended") == 1
+        && h.Db.Events.Count(e => e.OrderId == order.Id && e.Type == "order.confirmed") == 1
+        && h.Db.Outbox.Count == 1
+        && h.Db.Outbox[0].EventType == "order.confirmed";
+});
+
+await CheckAsync("phase 25: a machine still cannot reject an order waiting for review", async () =>
+{
+    var (db, move, order) = await Placed();
+    await move.ApplyAsync(Move(order.Id, OrderStatus.NeedsHuman, Actor.Machine, "order.needs_human"));
+
+    var refused = await move.ApplyAsync(Move(order.Id, OrderStatus.Rejected, Actor.Machine));
+
+    return refused.Outcome == TransitionOutcome.Refused
+        && refused.Reason == "Only a person can reject an order that was sent for review."
+        && db.Orders[order.Id].Status == OrderStatus.NeedsHuman;
 });
 
 // ---------------------------------------------------------------------------

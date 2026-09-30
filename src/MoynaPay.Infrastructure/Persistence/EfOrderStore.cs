@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Voice;
 using MoynaPay.Domain.Orders;
@@ -220,6 +221,41 @@ public sealed class EfOrderStore(MoynaPayDbContext db) : IOrderStore
         });
 
         await db.SaveChangesAsync(ct).ConfigureAwait(false);
+    }
+
+    public async Task<bool> SaveCallOutcomeAsync(Guid merchantId, Guid orderId,
+        Guid callSessionId, CallOutcome outcome, string? digit, string detail,
+        DateTimeOffset at, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(detail);
+
+        var order = await FindByIdAsync(merchantId, orderId, ct).ConfigureAwait(false);
+        if (order is null) return false;
+
+        var payload = CallOutcomePayload(callSessionId, outcome, digit);
+        var exists = await db.OrderEvents.AsNoTracking().AnyAsync(e =>
+            e.TenantId == merchantId
+            && e.OrderId == orderId
+            && e.Type == "call.ended"
+            && e.PayloadJson == payload, ct).ConfigureAwait(false);
+
+        if (exists) return false;
+
+        db.OrderEvents.Add(new OrderEvent
+        {
+            TenantId = merchantId,
+            OrderId = orderId,
+            Type = "call.ended",
+            Actor = Actor.Machine,
+            From = order.Status,
+            To = order.Status,
+            Detail = detail,
+            PayloadJson = payload,
+            At = at,
+        });
+
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+        return true;
     }
 
     /// <summary>
@@ -459,4 +495,12 @@ public sealed class EfOrderStore(MoynaPayDbContext db) : IOrderStore
             .ConfigureAwait(false);
 
     private sealed record EventFact(DateTimeOffset At, string Type, OrderStatus? To);
+
+    private static string CallOutcomePayload(Guid callSessionId, CallOutcome outcome, string? digit) =>
+        JsonSerializer.Serialize(new
+        {
+            callSessionId,
+            outcome = outcome.ToString(),
+            digit,
+        });
 }

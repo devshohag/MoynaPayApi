@@ -341,6 +341,10 @@ public interface IOrderStore
     Task ScheduleNextCallAsync(Guid merchantId, Guid orderId, DateTimeOffset nextAttemptAt,
         DateTimeOffset scheduledAt, string reason, CancellationToken ct = default);
 
+    Task<bool> SaveCallOutcomeAsync(Guid merchantId, Guid orderId, Guid callSessionId,
+        CallOutcome outcome, string? digit, string detail, DateTimeOffset at,
+        CancellationToken ct = default);
+
     Task<ReviewClaimStoreResult> TryClaimReviewAsync(Guid merchantId, Guid orderId,
         string reviewer, DateTimeOffset now, TimeSpan claimFor, CancellationToken ct = default);
 

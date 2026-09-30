@@ -22,6 +22,7 @@ builder.Services.AddMoynaPay(builder.Configuration, builder.Environment.IsDevelo
 builder.Services.AddScoped<CreateOrderService>();
 builder.Services.AddScoped<OrderTransitionService>();
 builder.Services.AddScoped<OrderWorkflowService>();
+builder.Services.AddScoped<CallOutcomeService>();
 builder.Services.AddSingleton<VoiceHealth>();
 builder.Services.AddHostedService<VoiceWorker>();
 
@@ -629,83 +630,32 @@ internal sealed class VoiceWorker(
 
     private async Task ApplyOutcomeAsync(OutboundCall call, CallOutcome? outcome, CancellationToken ct)
     {
-        var final = outcome ?? CallOutcome.NoAnswer;
-
-        if ((final is CallOutcome.NoAnswer or CallOutcome.Failed or CallOutcome.Unreachable)
-            && await ScheduleRetryAsync(call, final, ct).ConfigureAwait(false))
-        {
-            return;
-        }
-
-        var target = OrderLifecycle.FromCallOutcome(final);
-
         await using var scope = scopes.CreateAsyncScope();
-        var workflow = scope.ServiceProvider.GetRequiredService<OrderWorkflowService>();
+        var outcomes = scope.ServiceProvider.GetRequiredService<CallOutcomeService>();
 
-        var result = await workflow.DecideAsync(new WorkflowDecisionCommand
+        var result = await outcomes.ApplyAsync(new CallOutcomeCommand
         {
             MerchantId = call.MerchantId,
             OrderId = call.OrderId,
-            To = target,
-            By = Actor.Machine,
-            Reason = final == CallOutcome.NoAnswer ? "call ended with no keypress" : "call ended with keypress",
-            Digit = final switch
-            {
-                CallOutcome.Confirmed => "1",
-                CallOutcome.Rejected => "0",
-                CallOutcome.NeedsHuman => "9",
-                _ => null,
-            },
-            EventType = target switch
-            {
-                OrderStatus.Confirmed => "order.confirmed",
-                OrderStatus.Rejected => "order.rejected",
-                OrderStatus.NeedsHuman => "order.needs_human",
-                _ => "order.changed",
-            },
+            CallSessionId = call.CallSessionId,
+            Outcome = outcome,
         }, ct).ConfigureAwait(false);
 
-        if (result.Outcome is TransitionOutcome.Refused or TransitionOutcome.NotFound)
+        if (result.Kind == CallOutcomeApplyKind.Retried)
+        {
+            log.LogInformation(
+                "Call {CallSessionId} for order {OrderId} scheduled retry {NextAttemptAt}",
+                call.CallSessionId, call.OrderId, result.NextAttemptAt);
+
+            return;
+        }
+
+        if (result.Kind is CallOutcomeApplyKind.Refused or CallOutcomeApplyKind.NotFound)
         {
             log.LogWarning(
                 "Call {CallSessionId} outcome {Outcome} could not move order {OrderId}: {Reason}",
-                call.CallSessionId, final, call.OrderId, result.Reason ?? result.Outcome.ToString());
+                call.CallSessionId, result.Outcome, call.OrderId, result.Reason ?? result.Kind.ToString());
         }
-    }
-
-    private async Task<bool> ScheduleRetryAsync(OutboundCall call, CallOutcome outcome, CancellationToken ct)
-    {
-        var order = await orders
-            .FindByIdAsync(call.MerchantId, call.OrderId, ct).ConfigureAwait(false);
-
-        if (order is null) return false;
-
-        var now = clock.UtcNow;
-        var next = new RedialPolicy().NextAttemptAt(
-            order.CallAttempts,
-            order.LastCallAttemptAt,
-            new CallingHours(),
-            now);
-
-        if (next is null) return false;
-
-        var reason = outcome == CallOutcome.NoAnswer
-            ? "call ended with no keypress"
-            : $"call ended as {outcome}";
-
-        await orders.ScheduleNextCallAsync(
-            call.MerchantId,
-            call.OrderId,
-            next.Value,
-            now,
-            reason,
-            ct).ConfigureAwait(false);
-
-        log.LogInformation(
-            "Call {CallSessionId} for order {OrderId} scheduled retry {NextAttemptAt}",
-            call.CallSessionId, call.OrderId, next.Value);
-
-        return true;
     }
 
     private void Sweep()

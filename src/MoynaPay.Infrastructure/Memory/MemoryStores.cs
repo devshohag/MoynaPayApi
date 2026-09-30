@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
 using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Voice;
@@ -384,6 +385,49 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
         return Task.CompletedTask;
     }
 
+    public Task<bool> SaveCallOutcomeAsync(Guid merchantId, Guid orderId, Guid callSessionId,
+        CallOutcome outcome, string? digit, string detail, DateTimeOffset at,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(detail);
+
+        var payload = CallOutcomePayload(callSessionId, outcome, digit);
+
+        lock (db.Gate)
+        {
+            if (!db.Orders.TryGetValue(orderId, out var order)
+                || order.TenantId != merchantId
+                || order.IsDeleted)
+            {
+                return Task.FromResult(false);
+            }
+
+            if (db.Events.Any(e =>
+                    e.TenantId == merchantId
+                    && e.OrderId == orderId
+                    && e.Type == "call.ended"
+                    && string.Equals(e.PayloadJson, payload, StringComparison.Ordinal)))
+            {
+                return Task.FromResult(false);
+            }
+
+            db.Events.Add(new OrderEvent
+            {
+                TenantId = merchantId,
+                OrderId = orderId,
+                Type = "call.ended",
+                Actor = Actor.Machine,
+                From = order.Status,
+                To = order.Status,
+                Detail = detail,
+                PayloadJson = payload,
+                At = at,
+            });
+
+            return Task.FromResult(true);
+        }
+    }
+
     public Task<ReviewClaimStoreResult> TryClaimReviewAsync(Guid merchantId, Guid orderId,
         string reviewer, DateTimeOffset now, TimeSpan claimFor, CancellationToken ct = default)
     {
@@ -571,6 +615,14 @@ public sealed class MemoryOrderStore(MemoryDatabase db) : IOrderStore
             return Task.FromResult(rows);
         }
     }
+
+    private static string CallOutcomePayload(Guid callSessionId, CallOutcome outcome, string? digit) =>
+        JsonSerializer.Serialize(new
+        {
+            callSessionId,
+            outcome = outcome.ToString(),
+            digit,
+        });
 }
 
 public sealed class MemoryInvoiceStore(MemoryDatabase db) : IInvoiceStore
