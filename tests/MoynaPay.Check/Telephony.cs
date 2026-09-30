@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Net;
 using Microsoft.Extensions.Configuration;
 using MoynaPay.Application.Voice.Media;
 using MoynaPay.Application.Voice.Speech;
@@ -175,6 +176,75 @@ internal static class Telephony
             var (read, format) = GeminiTtsClient.ExtractAudio(doc.RootElement);
 
             return format == AudioFormat.Gemini24k && read.SequenceEqual(pcm);
+        });
+
+        check("Gemini TTS uses generateContent with audio modality and configured voice", () =>
+        {
+            var handler = new RecordingHandler(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    candidates = new[]
+                    {
+                        new
+                        {
+                            content = new
+                            {
+                                parts = new[]
+                                {
+                                    new
+                                    {
+                                        inlineData = new
+                                        {
+                                            mimeType = "audio/l16;rate=24000",
+                                            data = Convert.ToBase64String(Tone(240, 24)),
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                })),
+            });
+
+            var client = new GeminiTtsClient(new HttpClient(handler), new TtsOptions(
+                "key", "gemini-test-tts", "Puck", Path.GetTempPath()));
+
+            _ = client.SynthesizeAsync("hello", CancellationToken.None)
+                .ToBlockingEnumerable()
+                .Single();
+
+            return handler.RequestUri?.AbsoluteUri
+                    == "https://generativelanguage.googleapis.com/v1beta/models/gemini-test-tts:generateContent"
+                && handler.Body is not null
+                && handler.Body.Contains("\"responseModalities\":[\"AUDIO\"]", StringComparison.Ordinal)
+                && handler.Body.Contains("\"voiceName\":\"Puck\"", StringComparison.Ordinal)
+                && handler.Body.Contains("\"text\":\"hello\"", StringComparison.Ordinal);
+        });
+
+        check("Gemini TTS failure includes Google's error body", () =>
+        {
+            var handler = new RecordingHandler(new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                ReasonPhrase = "Bad Request",
+                Content = new StringContent("{\"error\":{\"message\":\"bad voice\"}}"),
+            });
+
+            var client = new GeminiTtsClient(new HttpClient(handler), new TtsOptions(
+                "key", "gemini-test-tts", "BadVoice", Path.GetTempPath()));
+
+            try
+            {
+                _ = client.SynthesizeAsync("hello", CancellationToken.None)
+                    .ToBlockingEnumerable()
+                    .Single();
+                return false;
+            }
+            catch (HttpRequestException ex)
+            {
+                return ex.Message.Contains("400", StringComparison.Ordinal)
+                    && ex.Message.Contains("bad voice", StringComparison.Ordinal);
+            }
         });
 
         check("the same prompt hits the cache and calls Gemini once", () =>
@@ -1001,6 +1071,24 @@ internal static class Telephony
         {
             await Task.Delay(50, ct);
             yield return new AudioFrame(payload, OutputFormat, 0, DateTimeOffset.UtcNow);
+        }
+    }
+
+    private sealed class RecordingHandler(HttpResponseMessage response) : HttpMessageHandler
+    {
+        public Uri? RequestUri { get; private set; }
+
+        public string? Body { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestUri = request.RequestUri;
+            Body = request.Content is null
+                ? null
+                : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+            return response;
         }
     }
 }

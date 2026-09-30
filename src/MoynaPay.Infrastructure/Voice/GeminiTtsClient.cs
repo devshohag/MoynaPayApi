@@ -9,7 +9,7 @@ namespace MoynaPay.Infrastructure.Voice;
 
 public sealed class GeminiTtsClient(HttpClient http, TtsOptions options) : IStreamingSpeechSynthesizer
 {
-    private static readonly Uri Interactions = new("https://generativelanguage.googleapis.com/v1beta/interactions");
+    private const string GeminiBaseUrl = "https://generativelanguage.googleapis.com/v1beta/models/";
 
     public string ProviderName => "gemini";
 
@@ -28,43 +28,17 @@ public sealed class GeminiTtsClient(HttpClient http, TtsOptions options) : IStre
                 "Telephony:Tts:Model, and Telephony:Tts:Voice.");
         }
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, Interactions);
+        using var request = new HttpRequestMessage(HttpMethod.Post, BuildUri(options.Model));
         request.Headers.Add("x-goog-api-key", options.ApiKey);
-        request.Content = JsonContent.Create(new
-        {
-            model = options.Model,
-            input = new[]
-            {
-                new
-                {
-                    type = "user_input",
-                    content = new[]
-                    {
-                        new
-                        {
-                            type = "text",
-                            text,
-                        },
-                    },
-                },
-            },
-            response_format = new
-            {
-                type = "audio",
-                mime_type = "audio/l16",
-                sample_rate = 24000,
-            },
-            generation_config = new
-            {
-                speech_config = new[]
-                {
-                    new { voice = options.Voice },
-                },
-            },
-        });
+        request.Content = JsonContent.Create(BuildRequest(text, options.Voice));
 
         using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            throw new HttpRequestException(
+                $"Gemini TTS returned {(int)response.StatusCode} ({response.ReasonPhrase}): {error}");
+        }
 
         await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         using var json = await JsonDocument.ParseAsync(body, cancellationToken: ct).ConfigureAwait(false);
@@ -77,6 +51,42 @@ public sealed class GeminiTtsClient(HttpClient http, TtsOptions options) : IStre
             0,
             DateTimeOffset.UtcNow);
     }
+
+    public static Uri BuildUri(string model)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(model);
+
+        return new Uri(GeminiBaseUrl + Uri.EscapeDataString(model) + ":generateContent");
+    }
+
+    public static object BuildRequest(string text, string voice) => new
+    {
+        contents = new[]
+        {
+            new
+            {
+                role = "user",
+                parts = new[]
+                {
+                    new { text },
+                },
+            },
+        },
+        generationConfig = new
+        {
+            responseModalities = new[] { "AUDIO" },
+            speechConfig = new
+            {
+                voiceConfig = new
+                {
+                    prebuiltVoiceConfig = new
+                    {
+                        voiceName = voice,
+                    },
+                },
+            },
+        },
+    };
 
     public static (byte[] Pcm, AudioFormat Format) ExtractAudio(JsonElement root)
     {
