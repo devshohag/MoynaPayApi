@@ -1629,6 +1629,63 @@ await CheckAsync("call recording is archived and written to the order timeline",
         && eventRow.PayloadJson.Contains("objectStorageKey", StringComparison.Ordinal);
 });
 
+await CheckAsync("recording playback requires the owning merchant", async () =>
+{
+    var h = RecordingHarness();
+    var r = await h.Workflow.CreateAsync(Cmd());
+    var session = Guid.CreateVersion7();
+    var recordingName = CallRecordingService.RecordingName(session);
+    var stored = await h.Recordings.StoreFinishedAsync(new RecordingFinishedCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        CallSessionId = session,
+        RecordingName = recordingName,
+    });
+
+    var query = Query(stored.PlaybackUrl!);
+    var expires = long.Parse(query["expires"], System.Globalization.CultureInfo.InvariantCulture);
+    var key = query["key"];
+    var signature = query["sig"];
+
+    var mine = await h.Recordings.AuthorizePlaybackAsync(new RecordingPlaybackRequest(
+        merchantId, key, expires, signature));
+    var other = await h.Recordings.AuthorizePlaybackAsync(new RecordingPlaybackRequest(
+        Guid.CreateVersion7(), key, expires, signature));
+
+    return mine.Outcome == RecordingPlaybackOutcome.Authorized
+        && mine.ObjectStorageKey == key
+        && other.Outcome == RecordingPlaybackOutcome.Forbidden;
+});
+
+await CheckAsync("recording retention deletes audio from storage", async () =>
+{
+    var h = RecordingHarness();
+    var r = await h.Workflow.CreateAsync(Cmd());
+    var session = Guid.CreateVersion7();
+    var stored = await h.Recordings.StoreFinishedAsync(new RecordingFinishedCommand
+    {
+        MerchantId = merchantId,
+        OrderId = r.Order!.Id,
+        CallSessionId = session,
+        RecordingName = CallRecordingService.RecordingName(session),
+    });
+    var key = stored.ObjectStorageKey!;
+
+    var before = await h.Archive.ExistsAsync(key);
+    var sweep = await h.Recordings.SweepExpiredAsync([key], now.AddSeconds(-1));
+    var after = await h.Archive.ExistsAsync(key);
+    var query = Query(stored.PlaybackUrl!);
+    var expires = long.Parse(query["expires"], System.Globalization.CultureInfo.InvariantCulture);
+    var playback = await h.Recordings.AuthorizePlaybackAsync(new RecordingPlaybackRequest(
+        merchantId, key, expires, query["sig"]));
+
+    return before
+        && sweep == new RecordingRetentionResult(1, 1)
+        && !after
+        && playback.Outcome == RecordingPlaybackOutcome.Gone;
+});
+
 await CheckAsync("recording storage for a missing order is ignored", async () =>
 {
     var h = RecordingHarness();
@@ -2839,6 +2896,8 @@ sealed class FakeConversationModel(string response) : IConversationModel
 
 sealed class FakeRecordingArchive : IRecordingArchive
 {
+    private readonly Dictionary<string, byte[]> _objects = new(StringComparer.Ordinal);
+
     public string? LastRecordingName { get; private set; }
 
     public string? LastObjectStorageKey { get; private set; }
@@ -2850,9 +2909,16 @@ sealed class FakeRecordingArchive : IRecordingArchive
     {
         LastRecordingName = asteriskRecordingName;
         LastObjectStorageKey = objectStorageKey;
+        _objects[objectStorageKey] = [1, 2, 3];
 
         return Task.FromResult(new RecordingArchiveResult(objectStorageKey, 12_345, 42));
     }
+
+    public Task<bool> ExistsAsync(string objectStorageKey, CancellationToken ct = default) =>
+        Task.FromResult(_objects.ContainsKey(objectStorageKey));
+
+    public Task<bool> DeleteAsync(string objectStorageKey, CancellationToken ct = default) =>
+        Task.FromResult(_objects.Remove(objectStorageKey));
 }
 
 sealed class RecordingWebhookSender(bool succeeds) : IWebhookSender

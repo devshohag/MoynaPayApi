@@ -12,6 +12,10 @@ public interface IRecordingArchive
         string asteriskRecordingName,
         string objectStorageKey,
         CancellationToken ct = default);
+
+    Task<bool> ExistsAsync(string objectStorageKey, CancellationToken ct = default);
+
+    Task<bool> DeleteAsync(string objectStorageKey, CancellationToken ct = default);
 }
 
 public sealed class NoopRecordingArchive : IRecordingArchive
@@ -21,6 +25,12 @@ public sealed class NoopRecordingArchive : IRecordingArchive
         string objectStorageKey,
         CancellationToken ct = default) =>
         Task.FromResult(new RecordingArchiveResult(objectStorageKey, 0, 0));
+
+    public Task<bool> ExistsAsync(string objectStorageKey, CancellationToken ct = default) =>
+        Task.FromResult(true);
+
+    public Task<bool> DeleteAsync(string objectStorageKey, CancellationToken ct = default) =>
+        Task.FromResult(true);
 }
 
 public sealed record RecordingFinishedCommand
@@ -43,6 +53,26 @@ public sealed record RecordingStoreResult(
     Order? Order,
     string? ObjectStorageKey,
     string? PlaybackUrl);
+
+public enum RecordingPlaybackOutcome
+{
+    Authorized,
+    Forbidden,
+    ExpiredOrInvalid,
+    Gone,
+}
+
+public sealed record RecordingPlaybackRequest(
+    Guid MerchantId,
+    string ObjectStorageKey,
+    long Expires,
+    string? Signature);
+
+public sealed record RecordingPlaybackResult(
+    RecordingPlaybackOutcome Outcome,
+    string? ObjectStorageKey);
+
+public sealed record RecordingRetentionResult(int Examined, int Deleted);
 
 public sealed class CallRecordingService(
     IOrderStore orders,
@@ -101,12 +131,62 @@ public sealed class CallRecordingService(
             playbackUrl);
     }
 
+    public async Task<RecordingPlaybackResult> AuthorizePlaybackAsync(
+        RecordingPlaybackRequest request,
+        CancellationToken ct = default)
+    {
+        if (!signer.Verify(request.ObjectStorageKey, request.Expires, request.Signature, clock.UtcNow))
+        {
+            return new RecordingPlaybackResult(RecordingPlaybackOutcome.ExpiredOrInvalid, null);
+        }
+
+        if (!BelongsToMerchant(request.ObjectStorageKey, request.MerchantId))
+        {
+            return new RecordingPlaybackResult(RecordingPlaybackOutcome.Forbidden, null);
+        }
+
+        if (!await archive.ExistsAsync(request.ObjectStorageKey, ct).ConfigureAwait(false))
+        {
+            return new RecordingPlaybackResult(RecordingPlaybackOutcome.Gone, null);
+        }
+
+        return new RecordingPlaybackResult(
+            RecordingPlaybackOutcome.Authorized,
+            request.ObjectStorageKey);
+    }
+
+    public async Task<RecordingRetentionResult> SweepExpiredAsync(
+        IEnumerable<string> objectStorageKeys,
+        DateTimeOffset retainUntil,
+        CancellationToken ct = default)
+    {
+        var examined = 0;
+        var deleted = 0;
+
+        if (retainUntil > clock.UtcNow)
+            return new RecordingRetentionResult(0, 0);
+
+        foreach (var key in objectStorageKeys)
+        {
+            examined++;
+            if (await archive.DeleteAsync(key, ct).ConfigureAwait(false))
+                deleted++;
+        }
+
+        return new RecordingRetentionResult(examined, deleted);
+    }
+
     public static string RecordingName(Guid callSessionId) =>
         $"moynapay-{callSessionId:N}";
 
     private static string ObjectKey(RecordingFinishedCommand command) =>
         $"recordings/{command.MerchantId:D}/{command.OrderId:D}/{command.CallSessionId:D}/" +
         $"{SafeName(command.RecordingName)}.wav";
+
+    private static bool BelongsToMerchant(string objectStorageKey, Guid merchantId) =>
+        objectStorageKey.StartsWith(
+            $"recordings/{merchantId:D}/",
+            StringComparison.Ordinal);
 
     private static string SafeName(string value)
     {
