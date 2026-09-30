@@ -189,6 +189,7 @@ internal sealed class VoiceWorker(
     DtmfCollector keypresses,
     IPromptVoice voice,
     IOrderStore orders,
+    TrunkResolver trunks,
     IServiceScopeFactory scopes,
     VoiceHealth health,
     IConfiguration configuration,
@@ -321,11 +322,13 @@ internal sealed class VoiceWorker(
 
             try
             {
+                var route = await trunks.ResolveAsync(claim.Order, ct).ConfigureAwait(false);
+
                 await ari.OriginateEndpointAsync(
                     session,
                     channelId,
-                    CallerId(),
-                    EndpointFor(claim.Order),
+                    route.CallerId,
+                    route.Endpoint,
                     ct).ConfigureAwait(false);
 
                 await orders.RecordCallAttemptAsync(
@@ -350,26 +353,6 @@ internal sealed class VoiceWorker(
         int.TryParse(configuration[key], NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
             ? value
             : fallback;
-
-    private string CallerId() =>
-        configuration["Telephony:CallerId"] ?? "09610000000";
-
-    private string EndpointFor(Order order)
-    {
-        var template = configuration["Telephony:DialEndpointTemplate"];
-        if (!string.IsNullOrWhiteSpace(template))
-        {
-            return template.Replace("{msisdn}", order.Msisdn, StringComparison.Ordinal);
-        }
-
-        if (configuration["Telephony:DevSoftphoneEndpoint"] is { Length: > 0 } dev)
-        {
-            return dev;
-        }
-
-        var trunk = configuration["Telephony:TrunkName"] ?? "bd-trunk";
-        return $"PJSIP/{order.Msisdn}@{trunk}";
-    }
 
     private async Task HandleAsync(AriEvent evt, CancellationToken ct)
     {

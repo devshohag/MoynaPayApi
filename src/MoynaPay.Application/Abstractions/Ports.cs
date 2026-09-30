@@ -1,6 +1,7 @@
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
 using MoynaPay.Domain.Payments;
+using MoynaPay.Domain.Voice;
 
 namespace MoynaPay.Application.Abstractions;
 
@@ -423,3 +424,10 @@ public enum ReviewReleaseStoreOutcome
 
 public sealed record ReviewReleaseStoreResult(
     ReviewReleaseStoreOutcome Outcome, Order? Order, string? Reason);
+
+public interface ISipTrunkStore
+{
+    Task<SipTrunk?> FindActiveForMerchantAsync(Guid merchantId, CancellationToken ct = default);
+
+    Task SaveAsync(SipTrunk trunk, CancellationToken ct = default);
+}

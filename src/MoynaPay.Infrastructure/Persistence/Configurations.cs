@@ -6,6 +6,7 @@ using MoynaPay.Application.Abstractions;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
 using MoynaPay.Domain.Payments;
+using MoynaPay.Domain.Voice;
 
 namespace MoynaPay.Infrastructure.Persistence;
 
@@ -258,6 +259,22 @@ internal sealed class OrderConfiguration : IEntityTypeConfiguration<Order>
 
         // What the dialler asks every pass: open call orders whose retry time has arrived.
         builder.HasIndex(x => new { x.TenantId, x.Status, x.NextCallAttemptAt });
+    }
+}
+
+internal sealed class SipTrunkConfiguration : IEntityTypeConfiguration<SipTrunk>
+{
+    public void Configure(EntityTypeBuilder<SipTrunk> builder)
+    {
+        builder.ToTable("sip_trunks", "telephony");
+
+        builder.Property(x => x.ProviderName).HasMaxLength(120).IsRequired();
+        builder.Property(x => x.Host).HasMaxLength(200).IsRequired();
+        builder.Property(x => x.Username).HasMaxLength(120);
+        builder.Property(x => x.SecretStoreReference).HasMaxLength(200);
+        builder.Property(x => x.CallerId).HasMaxLength(40).IsRequired();
+
+        builder.HasIndex(x => new { x.TenantId, x.IsActive });
     }
 }
 

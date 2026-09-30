@@ -6,6 +6,7 @@ using MoynaPay.Domain.Common;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
 using MoynaPay.Domain.Payments;
+using MoynaPay.Domain.Voice;
 
 namespace MoynaPay.Infrastructure.Persistence;
 
@@ -47,6 +48,7 @@ public sealed class MoynaPayDbContext(
     public DbSet<WorkflowAction> WorkflowActions => Set<WorkflowAction>();
 
     public DbSet<Invoice> Invoices => Set<Invoice>();
+    public DbSet<SipTrunk> SipTrunks => Set<SipTrunk>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {

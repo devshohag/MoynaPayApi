@@ -70,8 +70,14 @@ public static class DependencyInjection
         services.AddSingleton<Application.Voice.Ari.CallCorrelator>();
         services.AddSingleton<Application.Voice.DtmfCollector>();
         services.AddSingleton(_ => Voice.TtsOptions.FromConfiguration(configuration, isDevelopment));
+        services.AddSingleton(_ => new Application.Voice.TelephonyRoutingOptions(
+            configuration["Telephony:CallerId"] ?? "09610000000",
+            configuration["Telephony:TrunkName"] ?? "bd-trunk",
+            configuration["Telephony:DevSoftphoneEndpoint"],
+            configuration["Telephony:DialEndpointTemplate"]));
         services.AddHttpClient<IStreamingSpeechSynthesizer, Voice.GeminiTtsClient>();
         services.AddSingleton<IPromptVoice, Voice.CachedPromptVoice>();
+        services.AddScoped<Application.Voice.TrunkResolver>();
 
         if (IsInMemory(configuration))
         {
@@ -83,6 +89,7 @@ public static class DependencyInjection
             services.AddSingleton<IMerchantStore, MemoryMerchantStore>();
             services.AddSingleton<IOrderStore, MemoryOrderStore>();
             services.AddSingleton<IInvoiceStore, MemoryInvoiceStore>();
+            services.AddSingleton<ISipTrunkStore, MemorySipTrunkStore>();
             services.AddSingleton<IWorkflowSessionStore, MemoryWorkflowSessionStore>();
             services.AddSingleton<IWorkflowActionStore, MemoryWorkflowActionStore>();
             services.AddSingleton<IAppAuthStore, MemoryAppAuthStore>();

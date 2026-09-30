@@ -6,6 +6,7 @@ using MoynaPay.Application.Voice;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
 using MoynaPay.Domain.Payments;
+using MoynaPay.Domain.Voice;
 
 namespace MoynaPay.Infrastructure.Memory;
 
@@ -36,6 +37,7 @@ public sealed class MemoryDatabase
 
     public ConcurrentDictionary<Guid, Order> Orders { get; } = new();
     public ConcurrentDictionary<Guid, Invoice> Invoices { get; } = new();
+    public ConcurrentDictionary<Guid, SipTrunk> SipTrunks { get; } = new();
     public List<OrderEvent> Events { get; } = [];
     public List<OutboxMessage> Outbox { get; } = [];
     public ConcurrentDictionary<string, WorkflowSession> WorkflowSessions { get; } = new(StringComparer.Ordinal);
@@ -642,6 +644,28 @@ public sealed class MemoryInvoiceStore(MemoryDatabase db) : IInvoiceStore
         ArgumentNullException.ThrowIfNull(invoice);
 
         db.Invoices[invoice.Id] = invoice;
+
+        return Task.CompletedTask;
+    }
+}
+
+public sealed class MemorySipTrunkStore(MemoryDatabase db) : ISipTrunkStore
+{
+    public Task<SipTrunk?> FindActiveForMerchantAsync(Guid merchantId, CancellationToken ct = default)
+    {
+        var trunk = db.SipTrunks.Values
+            .Where(t => t.TenantId == merchantId && !t.IsDeleted && t.IsActive)
+            .OrderByDescending(t => t.UpdatedAt)
+            .FirstOrDefault();
+
+        return Task.FromResult(trunk);
+    }
+
+    public Task SaveAsync(SipTrunk trunk, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(trunk);
+
+        db.SipTrunks[trunk.Id] = trunk;
 
         return Task.CompletedTask;
     }

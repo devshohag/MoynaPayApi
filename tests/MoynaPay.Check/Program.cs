@@ -14,6 +14,7 @@ using MoynaPay.Application.Workflows;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
 using MoynaPay.Domain.Payments;
+using MoynaPay.Domain.Voice;
 using MoynaPay.Infrastructure.Memory;
 using MoynaPay.Infrastructure.Security;
 
@@ -2238,6 +2239,78 @@ await CheckAsync("phase 25: a machine still cannot reject an order waiting for r
     return refused.Outcome == TransitionOutcome.Refused
         && refused.Reason == "Only a person can reject an order that was sent for review."
         && db.Orders[order.Id].Status == OrderStatus.NeedsHuman;
+});
+
+// ---------------------------------------------------------------------------
+// Phase 30: merchant trunk resolution
+// ---------------------------------------------------------------------------
+TrunkResolver TrunkResolver(MemoryDatabase db) =>
+    new(new MemorySipTrunkStore(db), new TelephonyRoutingOptions(
+        "09610000000",
+        "shared-trunk",
+        null,
+        null));
+
+SipTrunk Trunk(Guid tenant, string host, string callerId, bool active = true) => new()
+{
+    TenantId = tenant,
+    ProviderName = "BTRC IPTSP",
+    Host = host,
+    CallerId = callerId,
+    IsActive = active,
+    CreatedAt = now,
+    UpdatedAt = now,
+};
+
+await CheckAsync("phase 30: a merchant with no trunk uses the shared trunk", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "TRUNK-SHARED", OrderStatus.Calling, now, msisdn: "8801711223344");
+
+    var route = await TrunkResolver(db).ResolveAsync(order);
+
+    return route.CallerId == "09610000000"
+        && route.Endpoint == "PJSIP/8801711223344@shared-trunk";
+});
+
+await CheckAsync("phase 30: the legacy endpoint template remains a fallback", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "TRUNK-TEMPLATE", OrderStatus.Calling, now, msisdn: "8801711223344");
+    var resolver = new TrunkResolver(new MemorySipTrunkStore(db), new TelephonyRoutingOptions(
+        "09610000000",
+        "shared-trunk",
+        null,
+        "PJSIP/{msisdn}@template-trunk"));
+
+    var route = await resolver.ResolveAsync(order);
+
+    return route.CallerId == "09610000000"
+        && route.Endpoint == "PJSIP/8801711223344@template-trunk";
+});
+
+await CheckAsync("phase 30: a disabled merchant trunk is never used", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "TRUNK-DISABLED", OrderStatus.Calling, now, msisdn: "8801711223344");
+    db.SipTrunks[Guid.CreateVersion7()] = Trunk(merchantId, "disabled-trunk", "09612222222", active: false);
+
+    var route = await TrunkResolver(db).ResolveAsync(order);
+
+    return route.CallerId == "09610000000"
+        && route.Endpoint == "PJSIP/8801711223344@shared-trunk";
+});
+
+await CheckAsync("phase 30: a merchant trunk controls caller id and endpoint", async () =>
+{
+    var db = DiallerDb();
+    var order = AddOrder(db, "TRUNK-MERCHANT", OrderStatus.Calling, now, msisdn: "8801711223344");
+    db.SipTrunks[Guid.CreateVersion7()] = Trunk(merchantId, "merchant-trunk", "09613333333");
+
+    var route = await TrunkResolver(db).ResolveAsync(order);
+
+    return route.CallerId == "09613333333"
+        && route.Endpoint == "PJSIP/8801711223344@merchant-trunk";
 });
 
 // ---------------------------------------------------------------------------

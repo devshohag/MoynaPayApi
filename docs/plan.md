@@ -238,8 +238,9 @@ gap gating, max-attempt handoff, and redials outside the window waiting until mo
 Existing: RedialPolicy in CallRules.cs.
 - Record every attempt; retry per policy; after the last attempt → NeedsHuman, never rejected.
 
-## Phase 25: Call outcome → OrderTransitionService
+## Phase 25: Call outcome → OrderTransitionService [DONE]
 - Map call outcomes to order transitions through the workflow; idempotent per attempt.
+- Implemented by CallOutcomeService with idempotent call.ended audit rows and workflow transitions.
 
 ## Phase 26: STT (Gemini) — listening path
 - Transcribe customer speech with Gemini; keep keypress as the primary signal.
@@ -253,8 +254,9 @@ Existing: RedialPolicy in CallRules.cs.
 ## Phase 29: Recording storage + playback URL
 - Store recordings after the call (never blocking), signed time-limited playback URL.
 
-## Phase 30: Trunk resolution per merchant
+## Phase 30: Trunk resolution per merchant [DONE]
 - Choose the SIP trunk/caller id per merchant.
+- Implemented SipTrunk, per-merchant routing, shared fallback trunk, and migration.
 
 ## Phase 31: Quota circuit breaker + fallback
 - When the speech API quota fails, stop calling it for a while and fall back to keypress-only prompts.
