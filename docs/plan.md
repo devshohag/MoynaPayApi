@@ -261,28 +261,51 @@ Existing: RedialPolicy in CallRules.cs.
 ## Phase 31: Quota circuit breaker + fallback
 - When the speech API quota fails, stop calling it for a while and fall back to keypress-only prompts.
 
-## Phase 32: bKash parser + corpus merge [PARTIAL]
+## Phase 32: bKash parser + corpus merge [DONE]
 Existing: Application/Payments/Parsing (MessageParser, BkashTemplates, BkashFieldReader) and fixtures/bkash/corpus.tsv.
 - Merge the full YoPay corpus; every corpus line must parse to the expected fields.
+- Done: bKash corpus rows now assert parsed kind plus expected amount, transaction id,
+  UTC timestamp, counterparty, reference, fee and balance when present; merchant-payment
+  received, reserved payment and bill-paid templates are covered by corpus rows.
 
-## Phase 33: Ingest + device auth + pairing
+## Phase 33: Ingest + device auth + pairing [DONE]
 - Endpoint for the Android app to post raw SMS/notification events, authenticated per paired device; dedupe raw events.
+- Done: paired app devices post raw events through the existing device-token credential;
+  server recomputes dedupe hashes, rejects untrusted senders/bad clocks, and stores raw
+  events behind memory/EF stores. EF migration generation was blocked locally by NuGet
+  signature lookup under `UsePostgres=true`.
 
-## Phase 34: Invoice + AmountAllocator [PARTIAL]
+## Phase 34: Invoice + AmountAllocator [DONE]
 Existing: AmountAllocator, InvoiceWindow, ReferenceCode, TrxIdInput.
 - Create invoices for orders with unique payable amounts inside the window.
+- Done: invoice creation now reserves unique open-window charged amounts with
+  `AmountAllocator`, writes `MatchingMode.UniqueAmount`, and falls back to `TrxId` when
+  the salt window is full.
 
-## Phase 35: Matcher — lock, window, dedupe
+## Phase 35: Matcher — lock, window, dedupe [DONE]
 - Match parsed transactions to invoices with FOR UPDATE SKIP LOCKED / advisory locks; one transaction pays one invoice.
+- Done: payment worker now claims raw events, parses bKash credits, dedupes provider
+  transaction ids, and settles exactly one open unique-amount invoice inside the payment
+  window. Unreadable, duplicate, ambiguous or unmatched messages remain visible for
+  review. The `TrxId` strategy is modelled but awaits a customer claim endpoint.
 
-## Phase 36: Settle → order Paid
+## Phase 36: Settle → order Paid [DONE]
 - A matched payment moves the order to Paid through the workflow and notifies the shop once.
+- Done: successful payment matches now stamp order payment fields, transition the order to
+  `Paid` through `OrderTransitionService`, and rely on the existing transition idempotency
+  to emit one `order.paid` outbox notification.
 
-## Phase 37: Review queue for unmatched payments
+## Phase 37: Review queue for unmatched payments [DONE]
 - Unmatched or ambiguous payments go to a person; manual match with audit.
+- Done: unmatched/unparseable payment rows now surface through payment review APIs;
+  reviewers can manually match a raw payment to an invoice, producing a manual payment
+  match, paid order transition, `order.paid` notification and `payment.manual_match`
+  audit event.
 
-## Phase 38: Device heartbeat + offline alert
-- Alert the merchant when a paired device stops reporting.
+## Phase 38: Device heartbeat + offline alert [DONE]
+- Alert the merchant when a paired device stops reporting. The payment worker now sweeps
+  stale paired devices, queues a `device.offline` webhook once per outage, and clears the
+  alert marker when the phone heartbeats again.
 
 ## Phase 39: Courier provider abstraction
 - One interface for create consignment, cancel, status; idempotent by order.

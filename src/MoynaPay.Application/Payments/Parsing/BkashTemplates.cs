@@ -10,10 +10,9 @@ namespace MoynaPay.Application.Payments.Parsing;
 /// that ran before the OTP pattern could plausibly match it, and the cost of that
 /// mistake is an order shipped for money that never arrived.
 ///
-/// Known gap: every credit pattern here comes from a personal account. The wording bKash
-/// sends to a merchant or retail account when a customer pays it has not been captured
-/// yet, and that is the single most important message in this product. It has to come
-/// from a real merchant-account handset during the T0A spike before the pilot.
+/// Merchant account wording varies more than personal-account wording, so it stays behind
+/// a narrow pattern and corpus rows. If bKash changes that sentence, the line turns
+/// Unknown instead of falling through to a looser credit guess.
 /// </summary>
 public static class BkashTemplates
 {
@@ -37,7 +36,9 @@ public static class BkashTemplates
         // looking like one transaction id arriving twice, which the deduplication index
         // would otherwise treat as a replay.
         new("bkash.payment.reserved", MessageKind.PaymentReserved,
-            @"^Payment of Tk\s?(?<amount>" + Amount + @") is being reserved for "),
+            @"^Payment of Tk\s?(?<amount>" + Amount + @") is being reserved for .+\. " +
+            @"Balance Tk\s?(?<balance>" + Amount + @")\. " +
+            @"TrxID (?<trxId>" + TrxId + @") at (?<at>" + Stamp + @")"),
 
         new("bkash.payment.sent", MessageKind.PaymentSent,
             @"^Payment of Tk\s?(?<amount>" + Amount + @") to .+ is successful\. " +
@@ -51,7 +52,9 @@ public static class BkashTemplates
 
         // Multi-line, and the only template where the label is "TrxID:" with a colon.
         new("bkash.bill.paid", MessageKind.BillPaid,
-            @"^Bill successfully paid\."),
+            @"^Bill successfully paid\. .+ Amount: Tk\s?(?<amount>" + Amount + @") " +
+            @"Fee: Tk\s?(?<fee>" + Amount + @") " +
+            @"TrxID: (?<trxId>" + TrxId + @") at (?<at>" + Stamp + @")"),
 
         // ---------------- credits ----------------
 
@@ -72,6 +75,12 @@ public static class BkashTemplates
         new("bkash.bank.deposit", MessageKind.BankDeposit,
             @"^You have received deposit from iBanking of Tk\s?(?<amount>" + Amount + @") " +
             @"from (?<counterparty>[^.]{1,80})\. " +
+            @"Fee Tk\s?(?<fee>" + Amount + @")\. Balance Tk\s?(?<balance>" + Amount + @")\. " +
+            @"TrxID (?<trxId>" + TrxId + @") at (?<at>" + Stamp + @")"),
+
+        new("bkash.merchant.payment.received", MessageKind.MerchantPaymentReceived,
+            @"^You have received payment Tk\s?(?<amount>" + Amount + @") from (?<counterparty>01\d{9})\. " +
+            @"(?:Counter No: (?<reference>[^.]{1,64})\. )?" +
             @"Fee Tk\s?(?<fee>" + Amount + @")\. Balance Tk\s?(?<balance>" + Amount + @")\. " +
             @"TrxID (?<trxId>" + TrxId + @") at (?<at>" + Stamp + @")"),
     ];

@@ -31,6 +31,7 @@ public static class PersistenceSetup
         services.AddScoped<IAppAuthStore, EfAppAuthStore>();
         services.AddScoped<IRateLimitStore, EfRateLimitStore>();
         services.AddScoped<IAppDeviceStore, EfAppDeviceStore>();
+        services.AddScoped<IRawEventStore, EfRawEventStore>();
         services.AddScoped<IWorkflowSessionStore, EfWorkflowSessionStore>();
         services.AddScoped<IWorkflowActionStore, EfWorkflowActionStore>();
         services.AddScoped<INonceStore, EfNonceStore>();

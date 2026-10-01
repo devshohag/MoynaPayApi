@@ -62,15 +62,20 @@ public sealed class WorkflowActionHandlers(
             if (await invoices.FindByOrderRefAsync(merchantId, order.Reference, ct).ConfigureAwait(false) is null)
             {
                 var window = InvoiceWindow.Default.Apply(now);
+                var takenAmounts = await invoices
+                    .ListOpenChargedAmountsAsync(merchantId, now, ct)
+                    .ConfigureAwait(false);
+                var chargedAmount = AmountAllocator.Allocate(order.Amount, takenAmounts);
                 var invoice = new Invoice
                 {
                     TenantId = merchantId,
                     OrderRef = order.Reference,
                     Amount = order.Amount,
-                    ChargedAmount = order.Amount,
+                    ChargedAmount = chargedAmount ?? order.Amount,
                     Status = InvoiceStatus.AwaitingPayment,
                     ExpiresAt = window.ExpiresAt,
                     GraceUntil = window.GraceUntil,
+                    Mode = chargedAmount is null ? MatchingMode.TrxId : MatchingMode.UniqueAmount,
                     CustomerName = order.CustomerName,
                     CustomerMsisdn = order.Msisdn,
                     CallbackUrl = order.CallbackUrl,

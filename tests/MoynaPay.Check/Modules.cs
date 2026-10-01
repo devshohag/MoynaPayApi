@@ -36,8 +36,10 @@ internal static class Modules
         check("the bKash corpus travelled with the parser", () => File.Exists(corpus));
 
         // Every line is a message somebody actually received. Replaying them is the only
-        // evidence that a parser change did not quietly stop recognising something.
-        check("every corpus message is read as the kind it says it is", () =>
+        // evidence that a parser change did not quietly stop recognising something. Rows
+        // may also carry expected fields after the body:
+        // kind, body, amount, trxId, utc timestamp, counterparty, reference, fee, balance.
+        check("every corpus message is read as the kind and fields it says it is", () =>
         {
             if (!File.Exists(corpus)) return false;
 
@@ -54,11 +56,18 @@ internal static class Modules
 
                 if (!Enum.TryParse<MessageKind>(parts[0], out var expected)) return false;
 
-                var parsed = parser.Parse("bKash", parts[1]);
+                var body = parts[1].Replace("\\n", "\n", StringComparison.Ordinal);
+                var parsed = parser.Parse("bKash", body);
 
                 if (parsed.Kind != expected)
                 {
-                    Console.WriteLine($"        {expected} read as {parsed.Kind}: {parts[1][..Math.Min(60, parts[1].Length)]}");
+                    Console.WriteLine($"        {expected} read as {parsed.Kind}: {body[..Math.Min(60, body.Length)]}");
+                    return false;
+                }
+
+                if (!FieldsMatch(parts, parsed))
+                {
+                    Console.WriteLine($"        {expected} fields did not match: {body[..Math.Min(60, body.Length)]}");
                     return false;
                 }
             }
@@ -145,6 +154,68 @@ internal static class Modules
         check("a small invoice gets at least one taka of room", () =>
             AmountAllocator.MaxSaltFor(50m) >= 1m
             && AmountAllocator.MaxSaltFor(100000m) == AmountAllocator.AbsoluteMaxSaltBdt);
+    }
+
+    private static bool FieldsMatch(string[] parts, ParsedMessage parsed)
+    {
+        if (parts.Length <= 2)
+        {
+            return true;
+        }
+
+        return DecimalField(parts, 2, parsed.Amount)
+            && TextField(parts, 3, parsed.TrxId)
+            && TimeField(parts, 4, parsed.OccurredAt)
+            && TextField(parts, 5, parsed.CounterpartyMsisdn)
+            && TextField(parts, 6, parsed.Reference)
+            && DecimalField(parts, 7, parsed.Fee)
+            && DecimalField(parts, 8, parsed.BalanceAfter);
+    }
+
+    private static bool DecimalField(string[] parts, int index, decimal? actual)
+    {
+        if (!Expected(parts, index, out var expected))
+        {
+            return true;
+        }
+
+        return decimal.TryParse(
+                expected,
+                System.Globalization.NumberStyles.Number,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var value)
+            && actual == value;
+    }
+
+    private static bool TextField(string[] parts, int index, string? actual) =>
+        !Expected(parts, index, out var expected)
+        || string.Equals(actual, expected, StringComparison.Ordinal);
+
+    private static bool TimeField(string[] parts, int index, DateTimeOffset? actual)
+    {
+        if (!Expected(parts, index, out var expected))
+        {
+            return true;
+        }
+
+        return DateTimeOffset.TryParse(
+                expected,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal,
+                out var value)
+            && actual == value.ToUniversalTime();
+    }
+
+    private static bool Expected(string[] parts, int index, out string expected)
+    {
+        expected = "";
+        if (parts.Length <= index || string.IsNullOrWhiteSpace(parts[index]))
+        {
+            return false;
+        }
+
+        expected = parts[index].Replace("\\n", "\n", StringComparison.Ordinal);
+        return true;
     }
 
     // -----------------------------------------------------------------------

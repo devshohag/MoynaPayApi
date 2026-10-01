@@ -220,6 +220,76 @@ internal sealed class AppDeviceConfiguration : IEntityTypeConfiguration<AppDevic
 
         // The app's device list and the later offline alert both read by merchant.
         builder.HasIndex(x => new { x.MerchantId, x.LastHeartbeatAt });
+
+        // The offline sweep asks for stale rows that have not already alerted.
+        builder.HasIndex(x => new { x.OfflineAlertedAt, x.LastHeartbeatAt });
+    }
+}
+
+internal sealed class RawEventConfiguration : IEntityTypeConfiguration<RawEvent>
+{
+    public void Configure(EntityTypeBuilder<RawEvent> builder)
+    {
+        builder.ToTable("raw_events", Schemas.Payments);
+
+        builder.HasKey(x => x.Id);
+
+        builder.Property(x => x.SenderId).HasMaxLength(40).IsRequired();
+        builder.Property(x => x.Body).HasMaxLength(2000).IsRequired();
+        builder.Property(x => x.DedupeHash).HasMaxLength(128).IsRequired();
+        builder.Property(x => x.FailureReason).HasMaxLength(500);
+
+        // At-least-once delivery from the phone: a resend may hit every API instance and
+        // still inserts one row.
+        builder.HasIndex(x => x.DedupeHash).IsUnique();
+
+        // The parser worker reads newly received rows by merchant/time.
+        builder.HasIndex(x => new { x.TenantId, x.State, x.DeviceReceivedAt });
+
+        // Device support screens and suspicious-device audits read the same stream by
+        // handset.
+        builder.HasIndex(x => new { x.DeviceId, x.DeviceReceivedAt });
+
+        builder.Ignore(x => x.Device);
+    }
+}
+
+internal sealed class ParsedTransactionConfiguration : IEntityTypeConfiguration<ParsedTransaction>
+{
+    public void Configure(EntityTypeBuilder<ParsedTransaction> builder)
+    {
+        builder.ToTable("parsed_transactions", Schemas.Payments);
+
+        builder.HasKey(x => x.Id);
+
+        builder.Property(x => x.TrxId).HasMaxLength(64).IsRequired();
+        builder.Property(x => x.SenderMsisdn).HasMaxLength(20);
+
+        builder.HasIndex(x => x.RawEventId).IsUnique();
+        builder.HasIndex(x => new { x.Method, x.TrxId }).IsUnique();
+        builder.HasIndex(x => new { x.TenantId, x.OccurredAt });
+
+        builder.Ignore(x => x.RawEvent);
+        builder.Ignore(x => x.Template);
+    }
+}
+
+internal sealed class PaymentMatchConfiguration : IEntityTypeConfiguration<PaymentMatch>
+{
+    public void Configure(EntityTypeBuilder<PaymentMatch> builder)
+    {
+        builder.ToTable("payment_matches", Schemas.Payments);
+
+        builder.HasKey(x => x.Id);
+
+        builder.Property(x => x.OperatorId).HasMaxLength(120);
+
+        builder.HasIndex(x => x.InvoiceId).IsUnique();
+        builder.HasIndex(x => x.ParsedTransactionId).IsUnique();
+        builder.HasIndex(x => new { x.TenantId, x.MatchedAt });
+
+        builder.Ignore(x => x.Invoice);
+        builder.Ignore(x => x.ParsedTransaction);
     }
 }
 

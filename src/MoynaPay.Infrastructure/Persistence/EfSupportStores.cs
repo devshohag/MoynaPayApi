@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using MoynaPay.Application.Abstractions;
+using MoynaPay.Application.Payments.Invoicing;
 using MoynaPay.Application.Security;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Payments;
@@ -11,6 +12,62 @@ public sealed class EfInvoiceStore(MoynaPayDbContext db) : IInvoiceStore
     public Task<Invoice?> FindByOrderRefAsync(Guid merchantId, string orderRef,
         CancellationToken ct = default) =>
         db.Invoices.FirstOrDefaultAsync(i => i.TenantId == merchantId && i.OrderRef == orderRef, ct);
+
+    public async Task<IReadOnlyList<decimal>> ListOpenChargedAmountsAsync(Guid merchantId,
+        DateTimeOffset at, CancellationToken ct = default) =>
+        await db.Invoices
+            .Where(i => i.TenantId == merchantId
+                && !i.IsDeleted
+                && (i.Status == InvoiceStatus.Created || i.Status == InvoiceStatus.AwaitingPayment)
+                && i.GraceUntil >= at)
+            .Select(i => i.ChargedAmount)
+            .ToListAsync(ct)
+            .ConfigureAwait(false);
+
+    public async Task<IReadOnlyList<Invoice>> FindOpenByChargedAmountAsync(Guid merchantId,
+        decimal chargedAmount, DateTimeOffset occurredAt, CancellationToken ct = default)
+    {
+        var candidates = await db.Invoices
+            .Where(i => i.TenantId == merchantId
+                && !i.IsDeleted
+                && i.Status == InvoiceStatus.AwaitingPayment
+                && i.Mode == MatchingMode.UniqueAmount
+                && i.ChargedAmount == chargedAmount)
+            .ToListAsync(ct)
+            .ConfigureAwait(false);
+
+        return candidates.Where(i => InvoiceWindow.Default.Accepts(i, occurredAt)).ToList();
+    }
+
+    public Task<bool> HasMatchedTransactionAsync(PaymentMethod method, string trxId,
+        CancellationToken ct = default) =>
+        (from match in db.PaymentMatches
+         join transaction in db.ParsedTransactions on match.ParsedTransactionId equals transaction.Id
+         where transaction.Method == method && transaction.TrxId == trxId
+         select match.Id).AnyAsync(ct);
+
+    public async Task SaveMatchAsync(Invoice invoice, ParsedTransaction transaction,
+        MatchStrategy strategy, DateTimeOffset matchedAt, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(invoice);
+        ArgumentNullException.ThrowIfNull(transaction);
+
+        if (db.Entry(invoice).State == EntityState.Detached) db.Invoices.Update(invoice);
+        db.ParsedTransactions.Add(transaction);
+        db.PaymentMatches.Add(new PaymentMatch
+        {
+            Id = Guid.CreateVersion7(),
+            TenantId = invoice.TenantId,
+            InvoiceId = invoice.Id,
+            ParsedTransactionId = transaction.Id,
+            Strategy = strategy,
+            MatchedAt = matchedAt,
+            CreatedAt = matchedAt,
+            UpdatedAt = matchedAt,
+        });
+
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+    }
 
     public async Task SaveAsync(Invoice invoice, CancellationToken ct = default)
     {

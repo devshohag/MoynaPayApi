@@ -62,6 +62,12 @@ public static class DependencyInjection
             AesGcmSecretProtector.FromConfiguration(configuration, isDevelopment));
 
         services.AddScoped<MoynaPay.Application.Outbox.OutboxDispatcher>();
+        services.AddScoped<Application.Orders.OrderTransitionService>();
+        services.AddScoped<Application.AppDevices.DeviceOfflineAlertService>();
+        services.AddSingleton<Application.Payments.Parsing.IMessageParser>(
+            _ => Application.Payments.Parsing.MessageParser.ForBkash());
+        services.AddScoped<Application.Payments.Matching.PaymentPipeline>();
+        services.AddScoped<Application.Payments.Matching.PaymentReviewService>();
 
         // Telephony. A singleton correlator because it IS the process's memory of which
         // channel belongs to which call - one per scope would forget the call between the
@@ -114,6 +120,7 @@ public static class DependencyInjection
             services.AddSingleton<IAppAuthStore, MemoryAppAuthStore>();
             services.AddSingleton<IRateLimitStore, MemoryRateLimitStore>();
             services.AddSingleton<IAppDeviceStore, MemoryAppDeviceStore>();
+            services.AddSingleton<IRawEventStore, MemoryRawEventStore>();
             services.AddSingleton<INonceStore, MemoryNonceStore>();
             services.AddSingleton<IOutboxStore, MemoryOutboxStore>();
 

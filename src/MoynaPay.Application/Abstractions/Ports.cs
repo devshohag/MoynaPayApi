@@ -223,6 +223,7 @@ public sealed class AppDevice
     public DevicePermissionState PermissionState { get; set; } = DevicePermissionState.Unknown;
     public int? BatteryPercent { get; set; }
     public string? NetworkType { get; set; }
+    public DateTimeOffset? OfflineAlertedAt { get; set; }
     public bool IsActive { get; set; } = true;
     public required DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset UpdatedAt { get; set; }
@@ -247,6 +248,26 @@ public interface IAppDeviceStore
         CancellationToken ct = default);
 
     Task<IReadOnlyList<AppDevice>> ListDevicesAsync(Guid merchantId,
+        CancellationToken ct = default);
+
+    Task<IReadOnlyList<AppDevice>> ListOfflineCandidatesAsync(DateTimeOffset cutoff,
+        int take, CancellationToken ct = default);
+
+    Task SaveOfflineAlertAsync(AppDevice device, OutboxMessage alert,
+        CancellationToken ct = default);
+}
+
+public interface IRawEventStore
+{
+    Task<bool> AddIfNewAsync(RawEvent rawEvent, CancellationToken ct = default);
+
+    Task<RawEvent?> FindAsync(Guid merchantId, Guid rawEventId, CancellationToken ct = default);
+
+    Task<IReadOnlyList<RawEvent>> ClaimReceivedAsync(int take, CancellationToken ct = default);
+
+    Task SaveAsync(RawEvent rawEvent, CancellationToken ct = default);
+
+    Task<IReadOnlyList<RawEvent>> ListByMerchantAsync(Guid merchantId,
         CancellationToken ct = default);
 }
 
@@ -385,6 +406,18 @@ public sealed record OrderCallClaim(Order Order, string ShopName);
 public interface IInvoiceStore
 {
     Task<Invoice?> FindByOrderRefAsync(Guid merchantId, string orderRef, CancellationToken ct = default);
+
+    Task<IReadOnlyList<decimal>> ListOpenChargedAmountsAsync(Guid merchantId,
+        DateTimeOffset at, CancellationToken ct = default);
+
+    Task<IReadOnlyList<Invoice>> FindOpenByChargedAmountAsync(Guid merchantId,
+        decimal chargedAmount, DateTimeOffset occurredAt, CancellationToken ct = default);
+
+    Task<bool> HasMatchedTransactionAsync(PaymentMethod method, string trxId,
+        CancellationToken ct = default);
+
+    Task SaveMatchAsync(Invoice invoice, ParsedTransaction transaction, MatchStrategy strategy,
+        DateTimeOffset matchedAt, CancellationToken ct = default);
 
     Task SaveAsync(Invoice invoice, CancellationToken ct = default);
 }

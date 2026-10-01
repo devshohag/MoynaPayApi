@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using MoynaPay.Application.Abstractions;
+using MoynaPay.Domain.Orders;
 
 namespace MoynaPay.Infrastructure.Persistence;
 
@@ -67,4 +68,32 @@ public sealed class EfAppDeviceStore(MoynaPayDbContext db) : IAppDeviceStore
             .OrderByDescending(d => d.LastHeartbeatAt ?? d.CreatedAt)
             .ToListAsync(ct)
             .ConfigureAwait(false);
+
+    public async Task<IReadOnlyList<AppDevice>> ListOfflineCandidatesAsync(
+        DateTimeOffset cutoff, int take, CancellationToken ct = default) =>
+        await db.AppDevices
+            .Where(d => d.IsActive
+                && d.OfflineAlertedAt == null
+                && (d.LastHeartbeatAt ?? d.CreatedAt) <= cutoff)
+            .OrderBy(d => d.LastHeartbeatAt ?? d.CreatedAt)
+            .Take(Math.Clamp(take, 1, 500))
+            .ToListAsync(ct)
+            .ConfigureAwait(false);
+
+    public async Task SaveOfflineAlertAsync(AppDevice device, OutboxMessage alert,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        ArgumentNullException.ThrowIfNull(alert);
+
+        await using var tx = await db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+        var tracked = db.ChangeTracker.Entries<AppDevice>()
+            .Any(e => ReferenceEquals(e.Entity, device));
+        if (!tracked) db.AppDevices.Update(device);
+
+        db.OutboxMessages.Add(alert);
+        await db.SaveChangesAsync(ct).ConfigureAwait(false);
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+    }
 }

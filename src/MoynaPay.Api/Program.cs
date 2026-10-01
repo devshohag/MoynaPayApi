@@ -12,6 +12,8 @@ using MoynaPay.Api;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Orders;
+using MoynaPay.Application.Payments.Ingestion;
+using MoynaPay.Application.Payments.Matching;
 using MoynaPay.Application.Workflows;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
@@ -56,6 +58,7 @@ builder.Services.AddScoped<AppHomeService>();
 builder.Services.AddScoped<AppOrderService>();
 builder.Services.AddScoped<AppOrderActionService>();
 builder.Services.AddScoped<AppSettingsService>();
+builder.Services.AddScoped<RawEventIngestService>();
 
 var app = builder.Build();
 
@@ -386,6 +389,28 @@ app.MapPut("/app/v1/devices/{deviceId:guid}/push-token", async (
         deviceId, DeviceToken(context), request.PushToken, ct).ConfigureAwait(false);
 
     return DeviceUpdateResponse(result);
+});
+
+app.MapPost("/app/v1/devices/{deviceId:guid}/events", async (
+    Guid deviceId, AppDeviceEventsRequest request, HttpContext context,
+    AppDevicesService devices, RawEventIngestService ingest, CancellationToken ct) =>
+{
+    var device = await devices.AuthenticateAsync(deviceId, DeviceToken(context), ct)
+        .ConfigureAwait(false);
+    if (device is null) return Results.Unauthorized();
+
+    var events = request.Events ?? [];
+    var result = await ingest.IngestAsync(
+        device,
+        events.Select(e => new RawDeviceEvent(
+                e.Source,
+                e.SenderId,
+                e.Body,
+                e.ReceivedAt ?? DateTimeOffset.MinValue))
+            .ToList(),
+        ct).ConfigureAwait(false);
+
+    return Results.Ok(result);
 });
 
 // ---------------------------------------------------------------------------
@@ -751,6 +776,43 @@ app.MapPost("/v1/review/orders/{reference}/outcome", async (
     };
 });
 
+app.MapGet("/v1/review/payments", async (
+    HttpContext context, PaymentReviewService reviews, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    return Results.Ok(await reviews.ListAsync(merchantId, ct).ConfigureAwait(false));
+});
+
+app.MapPost("/v1/review/payments/{rawEventId:guid}/match", async (
+    Guid rawEventId, ManualPaymentMatchRequest request, HttpContext context,
+    PaymentReviewService reviews, CancellationToken ct) =>
+{
+    if (context.Items[SignedRequestMiddleware.MerchantItem] is not Guid merchantId)
+    {
+        return Results.Unauthorized();
+    }
+
+    var result = await reviews.ManualMatchAsync(new ManualPaymentMatchCommand(
+        merchantId,
+        rawEventId,
+        request.OrderRef ?? "",
+        request.Reviewer,
+        request.Reason), ct).ConfigureAwait(false);
+
+    return result.Outcome switch
+    {
+        ManualPaymentMatchOutcome.Matched => Results.Ok(result.Invoice),
+        ManualPaymentMatchOutcome.NotFound or ManualPaymentMatchOutcome.InvoiceNotFound => Results.NotFound(),
+        ManualPaymentMatchOutcome.Invalid => Results.Problem(
+            title: result.Reason, statusCode: StatusCodes.Status400BadRequest),
+        _ => Results.Problem(title: "Payment is already matched.", statusCode: StatusCodes.Status409Conflict),
+    };
+});
+
 app.Run();
 
 /// <summary>
@@ -1054,3 +1116,16 @@ public sealed record AppDeviceHeartbeatRequest(
     string? Model);
 
 public sealed record AppDevicePushTokenRequest(string? PushToken);
+
+public sealed record AppDeviceEventsRequest(IReadOnlyList<AppDeviceEventRequest>? Events);
+
+public sealed record AppDeviceEventRequest(
+    EventSource? Source,
+    string? SenderId,
+    string? Body,
+    DateTimeOffset? ReceivedAt);
+
+public sealed record ManualPaymentMatchRequest(
+    string? OrderRef,
+    string? Reviewer,
+    string? Reason);

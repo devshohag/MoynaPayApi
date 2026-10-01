@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using MoynaPay.Application.Abstractions;
+using MoynaPay.Domain.Orders;
 using MoynaPay.Domain.Payments;
 
 namespace MoynaPay.Application.AppDevices;
@@ -89,6 +91,7 @@ public sealed class AppDevicesService(IAppDeviceStore devices, IClock clock)
 
         var now = clock.UtcNow;
         device.LastHeartbeatAt = now;
+        device.OfflineAlertedAt = null;
         device.PermissionState = command.PermissionState ?? device.PermissionState;
         device.BatteryPercent = ClampBattery(command.BatteryPercent);
         device.NetworkType = Clean(command.NetworkType, 40);
@@ -132,6 +135,10 @@ public sealed class AppDevicesService(IAppDeviceStore devices, IClock clock)
 
         return rows.Select(DeviceView.From).ToList();
     }
+
+    public Task<AppDevice?> AuthenticateAsync(
+        Guid deviceId, string? deviceToken, CancellationToken ct = default) =>
+        AuthenticatedDeviceAsync(deviceId, deviceToken, ct);
 
     private async Task<AppDevice?> AuthenticatedDeviceAsync(
         Guid deviceId, string? deviceToken, CancellationToken ct)
@@ -226,6 +233,8 @@ public sealed record DeviceView(
     DevicePermissionState PermissionState,
     int? BatteryPercent,
     string? NetworkType,
+    bool IsOffline,
+    DateTimeOffset? OfflineAlertedAt,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt)
 {
@@ -241,6 +250,77 @@ public sealed record DeviceView(
         device.PermissionState,
         device.BatteryPercent,
         device.NetworkType,
+        device.OfflineAlertedAt is not null,
+        device.OfflineAlertedAt,
         device.CreatedAt,
         device.UpdatedAt);
 }
+
+public sealed class DeviceOfflineAlertService(
+    IAppDeviceStore devices,
+    IMerchantStore merchants,
+    IClock clock)
+{
+    public static readonly TimeSpan OfflineAfter = TimeSpan.FromMinutes(10);
+
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+
+    public async Task<DeviceOfflineAlertRunResult> RunOnceAsync(
+        int take = 100, CancellationToken ct = default)
+    {
+        var now = clock.UtcNow;
+        var cutoff = now.Subtract(OfflineAfter);
+        var candidates = await devices
+            .ListOfflineCandidatesAsync(cutoff, Math.Clamp(take, 1, 500), ct)
+            .ConfigureAwait(false);
+
+        var alerted = 0;
+        var skipped = 0;
+
+        foreach (var device in candidates)
+        {
+            var endpoint = await merchants.WebhookAsync(device.MerchantId, ct)
+                .ConfigureAwait(false);
+            if (endpoint is null || !endpoint.Active)
+            {
+                skipped++;
+                continue;
+            }
+
+            var staleSince = device.LastHeartbeatAt ?? device.CreatedAt;
+            var payload = JsonSerializer.Serialize(new
+            {
+                @event = "device.offline",
+                deviceId = device.Id,
+                fingerprint = device.Fingerprint,
+                name = device.Name,
+                model = device.Model,
+                appVersion = device.AppVersion,
+                lastHeartbeatAt = device.LastHeartbeatAt,
+                offlineSince = staleSince,
+                offlineAfterSeconds = (int)OfflineAfter.TotalSeconds,
+                at = now,
+            }, Json);
+
+            device.OfflineAlertedAt = now;
+            device.UpdatedAt = now;
+
+            await devices.SaveOfflineAlertAsync(device, new OutboxMessage
+            {
+                TenantId = device.MerchantId,
+                OrderId = Guid.Empty,
+                EventType = "device.offline",
+                PayloadJson = payload,
+                NextAttemptAt = now,
+                CreatedAt = now,
+                UpdatedAt = now,
+            }, ct).ConfigureAwait(false);
+
+            alerted++;
+        }
+
+        return new DeviceOfflineAlertRunResult(candidates.Count, alerted, skipped);
+    }
+}
+
+public sealed record DeviceOfflineAlertRunResult(int Checked, int Alerted, int Skipped);

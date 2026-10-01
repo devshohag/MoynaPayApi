@@ -1,47 +1,49 @@
+# Columns: kind, body, amount, trxId, occurredAtUtc, counterparty, reference, fee, balance
 # ---- credits: money into the wallet ----
-P2PReceived	You have received Tk 200.00 from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DHD6EYO3HO at 13/08/2026 16:02
-P2PReceived	You have received Tk 100.00 from 01516600520. Fee Tk 0.00. Balance Tk 9,444.89. TrxID DGU1VLN1D7 at 30/07/2026 17:49
-P2PReceived	You have received Tk 150.00 from 01999997748. Fee Tk 0.00. Balance Tk 17,434.89. TrxID DH494CEKCH at 04/08/2026 16:44
-# the only message in the whole corpus carrying a customer-typed reference
-P2PReceived	You have received Tk 550.00 from 01780780720. Ref Ohidul. Fee Tk 0.00. Balance Tk 19,509.78. TrxID DGP5P2OD65 at 25/07/2026 09:16
-CashIn	Cash In Tk 2,040.00 from 01689526237 successful. Fee Tk 0.00. Balance Tk 2,040.29. TrxID DIG3JM06NX at 16/09/2026 10:57. Download App: https://bKa.sh/8app
-CashIn	Cash In Tk 550.00 from 01712061262 successful. Fee Tk 0.00. Balance Tk 550.66. TrxID DHP2RIFLCE at 25/08/2026 09:45. Download App: https://bKa.sh/8app
-CashIn	Cash In Tk 1,530.00 from 01689526237 successful. Fee Tk 0.00. Balance Tk 1,530.66. TrxID DHP3RZHPTP at 25/08/2026 17:13. Download App: https://bKa.sh/8app
-CashIn	Cash In Tk 500.00 from 01750859084 successful. Fee Tk 0.00. Balance Tk 529.91. TrxID DHN2PZ560G at 23/08/2026 19:23. Download App: https://bKa.sh/8app
-CashIn	Cash In Tk 1,020.00 from 01689526237 successful. Fee Tk 0.00. Balance Tk 1,045.41. TrxID DHI9KKPR0R at 18/08/2026 17:01. Download App: https://bKa.sh/8app
-BankDeposit	You have received deposit from iBanking of Tk 870.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 1,121.79. TrxID DIL6QCKV7U at 21/09/2026 20:26
-BankDeposit	You have received deposit from iBanking of Tk 3,000.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 7,114.29. TrxID DI69866YUZ at 06/09/2026 18:53
-BankDeposit	You have received deposit from iBanking of Tk 100.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 209.29. TrxID DIA2CUM6VQ at 10/09/2026 15:44
-BankDeposit	You have received deposit from iBanking of Tk 15,000.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 15,002.91. TrxID DI192I8XYT at 01/09/2026 18:12
-BankDeposit	You have received deposit from iBanking of Tk 200.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 1,471.86. TrxID DHC4DD9M1Q at 12/08/2026 09:59
-BankDeposit	You have received deposit from iBanking of Tk 210.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 1,681.86. TrxID DHC9DDDK4B at 12/08/2026 10:02
-BankDeposit	You have received deposit from iBanking of Tk 150.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 17,284.89. TrxID DH444BAHMA at 04/08/2026 16:17
-BankDeposit	You have received deposit from iBanking of Tk 10,000.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 20,415.89. TrxID DH180FQU7A at 01/08/2026 11:59
-BankDeposit	You have received deposit from iBanking of Tk 1,000.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 10,415.89. TrxID DH180FLOGW at 01/08/2026 11:55
+P2PReceived	You have received Tk 200.00 from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DHD6EYO3HO at 13/08/2026 16:02	200.00	DHD6EYO3HO	2026-08-13T10:02:00Z	01910126335		0.00	1881.86
+P2PReceived	You have received Tk 100.00 from 01516600520. Fee Tk 0.00. Balance Tk 9,444.89. TrxID DGU1VLN1D7 at 30/07/2026 17:49	100.00	DGU1VLN1D7	2026-07-30T11:49:00Z	01516600520		0.00	9444.89
+P2PReceived	You have received Tk 150.00 from 01999997748. Fee Tk 0.00. Balance Tk 17,434.89. TrxID DH494CEKCH at 04/08/2026 16:44	150.00	DH494CEKCH	2026-08-04T10:44:00Z	01999997748		0.00	17434.89
+# the only personal-account message in the corpus carrying a customer-typed reference
+P2PReceived	You have received Tk 550.00 from 01780780720. Ref Ohidul. Fee Tk 0.00. Balance Tk 19,509.78. TrxID DGP5P2OD65 at 25/07/2026 09:16	550.00	DGP5P2OD65	2026-07-25T03:16:00Z	01780780720	Ohidul	0.00	19509.78
+CashIn	Cash In Tk 2,040.00 from 01689526237 successful. Fee Tk 0.00. Balance Tk 2,040.29. TrxID DIG3JM06NX at 16/09/2026 10:57. Download App: https://bKa.sh/8app	2040.00	DIG3JM06NX	2026-09-16T04:57:00Z	01689526237		0.00	2040.29
+CashIn	Cash In Tk 550.00 from 01712061262 successful. Fee Tk 0.00. Balance Tk 550.66. TrxID DHP2RIFLCE at 25/08/2026 09:45. Download App: https://bKa.sh/8app	550.00	DHP2RIFLCE	2026-08-25T03:45:00Z	01712061262		0.00	550.66
+CashIn	Cash In Tk 1,530.00 from 01689526237 successful. Fee Tk 0.00. Balance Tk 1,530.66. TrxID DHP3RZHPTP at 25/08/2026 17:13. Download App: https://bKa.sh/8app	1530.00	DHP3RZHPTP	2026-08-25T11:13:00Z	01689526237		0.00	1530.66
+CashIn	Cash In Tk 500.00 from 01750859084 successful. Fee Tk 0.00. Balance Tk 529.91. TrxID DHN2PZ560G at 23/08/2026 19:23. Download App: https://bKa.sh/8app	500.00	DHN2PZ560G	2026-08-23T13:23:00Z	01750859084		0.00	529.91
+CashIn	Cash In Tk 1,020.00 from 01689526237 successful. Fee Tk 0.00. Balance Tk 1,045.41. TrxID DHI9KKPR0R at 18/08/2026 17:01. Download App: https://bKa.sh/8app	1020.00	DHI9KKPR0R	2026-08-18T11:01:00Z	01689526237		0.00	1045.41
+BankDeposit	You have received deposit from iBanking of Tk 870.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 1,121.79. TrxID DIL6QCKV7U at 21/09/2026 20:26	870.00	DIL6QCKV7U	2026-09-21T14:26:00Z	BRAC Bank Internet Banking		0.00	1121.79
+BankDeposit	You have received deposit from iBanking of Tk 3,000.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 7,114.29. TrxID DI69866YUZ at 06/09/2026 18:53	3000.00	DI69866YUZ	2026-09-06T12:53:00Z	BRAC Bank Internet Banking		0.00	7114.29
+BankDeposit	You have received deposit from iBanking of Tk 100.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 209.29. TrxID DIA2CUM6VQ at 10/09/2026 15:44	100.00	DIA2CUM6VQ	2026-09-10T09:44:00Z	BRAC Bank Internet Banking		0.00	209.29
+BankDeposit	You have received deposit from iBanking of Tk 15,000.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 15,002.91. TrxID DI192I8XYT at 01/09/2026 18:12	15000.00	DI192I8XYT	2026-09-01T12:12:00Z	BRAC Bank Internet Banking		0.00	15002.91
+BankDeposit	You have received deposit from iBanking of Tk 200.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 1,471.86. TrxID DHC4DD9M1Q at 12/08/2026 09:59	200.00	DHC4DD9M1Q	2026-08-12T03:59:00Z	BRAC Bank Internet Banking		0.00	1471.86
+BankDeposit	You have received deposit from iBanking of Tk 210.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 1,681.86. TrxID DHC9DDDK4B at 12/08/2026 10:02	210.00	DHC9DDDK4B	2026-08-12T04:02:00Z	BRAC Bank Internet Banking		0.00	1681.86
+BankDeposit	You have received deposit from iBanking of Tk 150.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 17,284.89. TrxID DH444BAHMA at 04/08/2026 16:17	150.00	DH444BAHMA	2026-08-04T10:17:00Z	BRAC Bank Internet Banking		0.00	17284.89
+BankDeposit	You have received deposit from iBanking of Tk 10,000.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 20,415.89. TrxID DH180FQU7A at 01/08/2026 11:59	10000.00	DH180FQU7A	2026-08-01T05:59:00Z	BRAC Bank Internet Banking		0.00	20415.89
+BankDeposit	You have received deposit from iBanking of Tk 1,000.00 from BRAC Bank Internet Banking. Fee Tk 0.00. Balance Tk 10,415.89. TrxID DH180FLOGW at 01/08/2026 11:55	1000.00	DH180FLOGW	2026-08-01T05:55:00Z	BRAC Bank Internet Banking		0.00	10415.89
+MerchantPaymentReceived	You have received payment Tk 1,250.00 from 01711223344. Counter No: 1. Fee Tk 0.00. Balance Tk 21,665.89. TrxID DIZ1PAY123 at 30/09/2026 14:20	1250.00	DIZ1PAY123	2026-09-30T08:20:00Z	01711223344	1	0.00	21665.89
 
 # ---- negatives: must never settle an invoice ----
 # note the missing space in "20:18.Priyo" - real messages are not tidy
-CashOut	Cash Out Tk 500.00 to 01781660060 successful. Fee Tk 9.25. Balance Tk 14,493.66. TrxID DI162OH2NI at 01/09/2026 20:18.Priyo Cash Out at 13.95/thousand
-CashOut	Cash Out Tk 1,000.00 to 01733032448 successful. Fee Tk 18.50. Balance Tk 2.91. TrxID DHQ6T9CZUG at 26/08/2026 19:53.Priyo Cash Out at 13.95/thousand
-CashOut	Cash Out Tk 500.00 to 01611503044 successful. Fee Tk 9.25. Balance Tk 1,021.41. TrxID DHP0S6Y2VY at 25/08/2026 19:55.Priyo Cash Out at 13.95/thousand
-CashOut	Cash Out Tk 500.00 to 01710622388 successful. Fee Tk 9.25. Balance Tk 20.66. TrxID DHO8R0NSD2 at 24/08/2026 18:59.Priyo Cash Out at 13.95/thousand
-CashOut	Cash Out Tk 500.00 to 01611503044 successful. Fee Tk 9.25. Balance Tk 1,572.61. TrxID DHD4F6U9AE at 13/08/2026 19:13.Priyo Cash Out at 13.95/thousand
-PaymentSent	Payment of Tk 50.00 to Term Paper BD_01627147784 is successful. Balance Tk 1,481.04. TrxID DII0MQOMLA at 18/09/2026 21:04
-PaymentSent	Payment of Tk 416.00 to ROBI AXIATA LIMITED-RM9564 is successful. Balance Tk 14,077.66. TrxID DI162Q01ZM at 01/09/2026 20:51
-PaymentSent	Payment of Tk 204.00 to ROBI AXIATA LIMITED-RM9564 is successful. Balance Tk 759.36. TrxID DHE8GJKS5K at 14/08/2026 22:41
-PaymentSent	Payment of Tk 237.00 to My Airtel is successful. Balance Tk 20,139.89. TrxID DH212072RN at 02/08/2026 18:23
-PaymentSent	Payment of Tk 29.00 to ROBI AXIATA LIMITED-RM9564 is successful. Balance Tk 9,415.89. TrxID DGV4X0WCGG at 31/07/2026 21:31
+CashOut	Cash Out Tk 500.00 to 01781660060 successful. Fee Tk 9.25. Balance Tk 14,493.66. TrxID DI162OH2NI at 01/09/2026 20:18.Priyo Cash Out at 13.95/thousand	500.00	DI162OH2NI	2026-09-01T14:18:00Z	01781660060		9.25	14493.66
+CashOut	Cash Out Tk 1,000.00 to 01733032448 successful. Fee Tk 18.50. Balance Tk 2.91. TrxID DHQ6T9CZUG at 26/08/2026 19:53.Priyo Cash Out at 13.95/thousand	1000.00	DHQ6T9CZUG	2026-08-26T13:53:00Z	01733032448		18.50	2.91
+CashOut	Cash Out Tk 500.00 to 01611503044 successful. Fee Tk 9.25. Balance Tk 1,021.41. TrxID DHP0S6Y2VY at 25/08/2026 19:55.Priyo Cash Out at 13.95/thousand	500.00	DHP0S6Y2VY	2026-08-25T13:55:00Z	01611503044		9.25	1021.41
+CashOut	Cash Out Tk 500.00 to 01710622388 successful. Fee Tk 9.25. Balance Tk 20.66. TrxID DHO8R0NSD2 at 24/08/2026 18:59.Priyo Cash Out at 13.95/thousand	500.00	DHO8R0NSD2	2026-08-24T12:59:00Z	01710622388		9.25	20.66
+CashOut	Cash Out Tk 500.00 to 01611503044 successful. Fee Tk 9.25. Balance Tk 1,572.61. TrxID DHD4F6U9AE at 13/08/2026 19:13.Priyo Cash Out at 13.95/thousand	500.00	DHD4F6U9AE	2026-08-13T13:13:00Z	01611503044		9.25	1572.61
+PaymentSent	Payment of Tk 50.00 to Term Paper BD_01627147784 is successful. Balance Tk 1,481.04. TrxID DII0MQOMLA at 18/09/2026 21:04	50.00	DII0MQOMLA	2026-09-18T15:04:00Z				1481.04
+PaymentSent	Payment of Tk 416.00 to ROBI AXIATA LIMITED-RM9564 is successful. Balance Tk 14,077.66. TrxID DI162Q01ZM at 01/09/2026 20:51	416.00	DI162Q01ZM	2026-09-01T14:51:00Z				14077.66
+PaymentSent	Payment of Tk 204.00 to ROBI AXIATA LIMITED-RM9564 is successful. Balance Tk 759.36. TrxID DHE8GJKS5K at 14/08/2026 22:41	204.00	DHE8GJKS5K	2026-08-14T16:41:00Z				759.36
+PaymentSent	Payment of Tk 237.00 to My Airtel is successful. Balance Tk 20,139.89. TrxID DH212072RN at 02/08/2026 18:23	237.00	DH212072RN	2026-08-02T12:23:00Z				20139.89
+PaymentSent	Payment of Tk 29.00 to ROBI AXIATA LIMITED-RM9564 is successful. Balance Tk 9,415.89. TrxID DGV4X0WCGG at 31/07/2026 21:31	29.00	DGV4X0WCGG	2026-07-31T15:31:00Z				9415.89
 # the hold. same transaction id as the completion above it - this is why it needs its own template
-PaymentReserved	Payment of Tk 416.00 is being reserved for ROBI AXIATA LIMITED-RM9564. Balance Tk 14,077.66. TrxID DI162Q01ZM at 01/09/2026 20:51
-PaymentReserved	Payment of Tk 204.00 is being reserved for ROBI AXIATA LIMITED-RM9564. Balance Tk 759.36. TrxID DHE8GJKS5K at 14/08/2026 22:41
-PaymentReserved	Payment of Tk 39.00 is being reserved for ROBI AXIATA LIMITED-RM9564. Balance Tk 20,376.89. TrxID DH140NNUV2 at 01/08/2026 15:46
+PaymentReserved	Payment of Tk 416.00 is being reserved for ROBI AXIATA LIMITED-RM9564. Balance Tk 14,077.66. TrxID DI162Q01ZM at 01/09/2026 20:51	416.00	DI162Q01ZM	2026-09-01T14:51:00Z				14077.66
+PaymentReserved	Payment of Tk 204.00 is being reserved for ROBI AXIATA LIMITED-RM9564. Balance Tk 759.36. TrxID DHE8GJKS5K at 14/08/2026 22:41	204.00	DHE8GJKS5K	2026-08-14T16:41:00Z				759.36
+PaymentReserved	Payment of Tk 39.00 is being reserved for ROBI AXIATA LIMITED-RM9564. Balance Tk 20,376.89. TrxID DH140NNUV2 at 01/08/2026 15:46	39.00	DH140NNUV2	2026-08-01T09:46:00Z				20376.89
 # OTP: contains the word PAYMENT and an amount, and writes it as "Tk.50.00" with no space
 Otp	Do NOT share your OTP or PIN with anyone. Your bKash OTP for PAYMENT of Tk.50.00 to Term Paper BD_01627147784 is 824206. Expires in 2 min.
 Otp	Do NOT share your OTP or PIN with anyone. Your bKash OTP for PAYMENT of Tk.416.00 to My Robi is 356927. Expires in 2 min.
 Otp	Do NOT share your OTP or PIN with anyone. Your bKash OTP for PAYMENT of Tk.237.00 to SSLCOMMERZ is 452087. Expires in 2 min.
 # multi-line, and the only message that writes "TrxID:" with a colon
-BillPaid	Bill successfully paid.\nBiller: UniqueOnline\nMMYYYY/Contact: 072026\nA/C: 10033841\nAmount: Tk 525.00\nFee: Tk 0.00\nTrxID: DHP6RII8IM at 25/08/2026 09:46
-BillPaid	Bill successfully paid.\nBiller: 01790702625\nMMYYYY/Contact: 062026\nA/C: 261-0152-006\nAmount: Tk 1,000.00\nFee: Tk 11.50\nTrxID: DGP2P4CDSA at 25/07/2026 10:13
+BillPaid	Bill successfully paid.\nBiller: UniqueOnline\nMMYYYY/Contact: 072026\nA/C: 10033841\nAmount: Tk 525.00\nFee: Tk 0.00\nTrxID: DHP6RII8IM at 25/08/2026 09:46	525.00	DHP6RII8IM	2026-08-25T03:46:00Z			0.00
+BillPaid	Bill successfully paid.\nBiller: 01790702625\nMMYYYY/Contact: 062026\nA/C: 261-0152-006\nAmount: Tk 1,000.00\nFee: Tk 11.50\nTrxID: DGP2P4CDSA at 25/07/2026 10:13	1000.00	DGP2P4CDSA	2026-07-25T04:13:00Z			11.50
 
 # ---- malformed: truncated, corrupted or forged. all must come back Unknown ----
 Unknown	You have received Tk from 01910126335. Balance Tk 1,881.86

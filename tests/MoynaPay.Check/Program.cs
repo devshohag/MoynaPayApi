@@ -8,6 +8,9 @@ using MoynaPay.Application.AppSettings;
 using MoynaPay.Application.Abstractions;
 using MoynaPay.Application.Merchants;
 using MoynaPay.Application.Orders;
+using MoynaPay.Application.Payments.Ingestion;
+using MoynaPay.Application.Payments.Matching;
+using MoynaPay.Application.Payments.Parsing;
 using MoynaPay.Application.Security;
 using MoynaPay.Application.Voice;
 using MoynaPay.Application.Voice.Ai;
@@ -489,6 +492,97 @@ Dictionary<string, string> Query(string url)
     var h = AppAuthHarness(at);
 
     return (h.Db, new AppDevicesService(new MemoryAppDeviceStore(h.Db), h.Clock), h.Clock);
+}
+
+(MemoryDatabase Db, AppDevicesService Devices, DeviceOfflineAlertService OfflineAlerts,
+    FixedClock Clock) DeviceOfflineHarness(DateTimeOffset? at = null)
+{
+    var h = AppDeviceHarness(at);
+    var store = new MemoryAppDeviceStore(h.Db);
+
+    return (h.Db, h.Devices,
+        new DeviceOfflineAlertService(store, new MemoryMerchantStore(h.Db), h.Clock),
+        h.Clock);
+}
+
+(MemoryDatabase Db, AppDevicesService Devices, RawEventIngestService Ingest, FixedClock Clock)
+    RawIngestHarness(DateTimeOffset? at = null)
+{
+    var h = AppDeviceHarness(at);
+
+    return (h.Db, h.Devices, new RawEventIngestService(new MemoryRawEventStore(h.Db), h.Clock),
+        h.Clock);
+}
+
+(MemoryDatabase Db, WorkflowActionHandlers Actions, OrderWorkflowService Workflow,
+    RawEventIngestService Ingest, PaymentPipeline Pipeline, PaymentReviewService PaymentReviews)
+    PaymentPipelineHarness()
+{
+    var h = ActionHarness();
+    var rawEvents = new MemoryRawEventStore(h.Db);
+    var invoices = new MemoryInvoiceStore(h.Db);
+    var orders = new MemoryOrderStore(h.Db);
+    var merchants = new MemoryMerchantStore(h.Db);
+    var clock = new FixedClock(now);
+    var transitions = new OrderTransitionService(orders, merchants, clock);
+
+    return (h.Db, h.Actions, h.Workflow, new RawEventIngestService(rawEvents, clock),
+        new PaymentPipeline(rawEvents, invoices, orders, transitions, MessageParser.ForBkash(), clock),
+        new PaymentReviewService(rawEvents, invoices, orders, transitions, MessageParser.ForBkash(), clock));
+}
+
+(MemoryDatabase Db, AppDevicesService Devices, WorkflowActionHandlers Actions,
+    OrderWorkflowService Workflow, RawEventIngestService Ingest, PaymentPipeline Pipeline,
+    PaymentReviewService PaymentReviews, DeviceOfflineAlertService OfflineAlerts, FixedClock Clock)
+    PaymentE2eHarness()
+{
+    var db = new MemoryDatabase();
+    db.Merchants[merchantId] = new Merchant
+    {
+        Id = merchantId,
+        TenantId = merchantId,
+        Name = "Test Store",
+        Msisdn = "8801711111111",
+        TimeZone = "Asia/Dhaka",
+    };
+    db.Subscriptions[merchantId] = new Subscription
+    {
+        TenantId = merchantId,
+        Calls = false,
+        Payments = true,
+        Courier = false,
+        Plan = "trial",
+    };
+    db.Webhooks[merchantId] = new WebhookEndpoint
+    {
+        TenantId = merchantId,
+        Url = "https://shop.example.com/hook",
+        SecretCipher = "s",
+        KeyRingId = "dev",
+        Active = true,
+    };
+
+    var clock = new FixedClock(now);
+    var merchants = new MemoryMerchantStore(db);
+    var orders = new MemoryOrderStore(db);
+    var invoices = new MemoryInvoiceStore(db);
+    var devices = new MemoryAppDeviceStore(db);
+    var rawEvents = new MemoryRawEventStore(db);
+    var actionStore = new MemoryWorkflowActionStore(db);
+    var sessions = new MemoryWorkflowSessionStore(db);
+    var create = new CreateOrderService(orders, merchants, clock);
+    var transitions = new OrderTransitionService(orders, merchants, clock);
+    var workflow = new OrderWorkflowService(create, transitions, orders, merchants, sessions, clock);
+
+    return (db,
+        new AppDevicesService(devices, clock),
+        new WorkflowActionHandlers(actionStore, orders, invoices, transitions, clock),
+        workflow,
+        new RawEventIngestService(rawEvents, clock),
+        new PaymentPipeline(rawEvents, invoices, orders, transitions, MessageParser.ForBkash(), clock),
+        new PaymentReviewService(rawEvents, invoices, orders, transitions, MessageParser.ForBkash(), clock),
+        new DeviceOfflineAlertService(devices, merchants, clock),
+        clock);
 }
 
 Order AddOrder(MemoryDatabase db, string reference, OrderStatus status, DateTimeOffset createdAt,
@@ -1039,6 +1133,105 @@ await CheckAsync("app device push token update is stored but never returned", as
         && updated.Device.ToString()!.Contains("expo-token-1", StringComparison.Ordinal) == false;
 });
 
+await CheckAsync("offline device queues one merchant alert", async () =>
+{
+    var h = DeviceOfflineHarness(now);
+    h.Db.Webhooks[merchantId] = new WebhookEndpoint
+    {
+        TenantId = merchantId,
+        Url = "https://shop.example.com/hook",
+        SecretCipher = "s",
+        KeyRingId = "dev",
+        Active = true,
+    };
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var paired = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "install-1",
+        "Counter phone",
+        "Galaxy",
+        "1.0.0",
+        null,
+        DevicePermissionState.Healthy,
+        80,
+        "wifi"));
+
+    h.Clock.Set(now.Add(DeviceOfflineAlertService.OfflineAfter).AddSeconds(1));
+    var first = await h.OfflineAlerts.RunOnceAsync();
+    var second = await h.OfflineAlerts.RunOnceAsync();
+
+    return paired.Outcome == PairDeviceOutcome.Paired
+        && first.Alerted == 1
+        && second.Alerted == 0
+        && h.Db.Outbox.Count == 1
+        && h.Db.Outbox[0].EventType == "device.offline"
+        && h.Db.Outbox[0].TenantId == merchantId
+        && h.Db.Outbox[0].PayloadJson.Contains("\"deviceId\"", StringComparison.Ordinal)
+        && h.Db.AppDevices[paired.Device!.Id].OfflineAlertedAt is not null;
+});
+
+await CheckAsync("offline alert clears after the device heartbeats again", async () =>
+{
+    var h = DeviceOfflineHarness(now);
+    h.Db.Webhooks[merchantId] = new WebhookEndpoint
+    {
+        TenantId = merchantId,
+        Url = "https://shop.example.com/hook",
+        SecretCipher = "s",
+        KeyRingId = "dev",
+        Active = true,
+    };
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var paired = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "install-1",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null));
+
+    h.Clock.Set(now.Add(DeviceOfflineAlertService.OfflineAfter).AddSeconds(1));
+    await h.OfflineAlerts.RunOnceAsync();
+    var recovered = await h.Devices.HeartbeatAsync(
+        paired.Device!.Id, paired.DeviceToken, new DeviceHeartbeatCommand(
+            DevicePermissionState.Healthy,
+            70,
+            "4g",
+            null,
+            null));
+
+    return recovered.Outcome == DeviceUpdateOutcome.Updated
+        && recovered.Device!.IsOffline == false
+        && h.Db.AppDevices[paired.Device.Id].OfflineAlertedAt is null;
+});
+
+await CheckAsync("offline device without active webhook is not queued", async () =>
+{
+    var h = DeviceOfflineHarness(now);
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "install-1",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null));
+
+    h.Clock.Set(now.Add(DeviceOfflineAlertService.OfflineAfter).AddSeconds(1));
+    var result = await h.OfflineAlerts.RunOnceAsync();
+
+    return result.Checked == 1
+        && result.Alerted == 0
+        && result.Skipped == 1
+        && h.Db.Outbox.Count == 0;
+});
+
 await CheckAsync("app device list is scoped to one merchant", async () =>
 {
     var h = AppDeviceHarness();
@@ -1072,6 +1265,95 @@ await CheckAsync("app device list is scoped to one merchant", async () =>
         && mine[0].Fingerprint == "mine"
         && theirs.Count == 1
         && theirs[0].Fingerprint == "other";
+});
+
+await CheckAsync("paired app device ingests raw bKash events once", async () =>
+{
+    var h = RawIngestHarness();
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var paired = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "payments-phone",
+        null,
+        null,
+        null,
+        null,
+        DevicePermissionState.Healthy,
+        null,
+        null));
+    var device = await h.Devices.AuthenticateAsync(paired.Device!.Id, paired.DeviceToken);
+
+    var first = await h.Ingest.IngestAsync(device!, [
+        new RawDeviceEvent(
+            EventSource.Notification,
+            "bKash",
+            "You have received Tk 200.00 from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DHD6EYO3HO at 13/08/2026 16:02",
+            now),
+    ]);
+    var replay = await h.Ingest.IngestAsync(device!, [
+        new RawDeviceEvent(
+            EventSource.Sms,
+            " bKash ",
+            "  You have received Tk 200.00 from 01910126335.\nFee Tk 0.00. Balance Tk 1,881.86. TrxID DHD6EYO3HO at 13/08/2026 16:02  ",
+            now),
+    ]);
+
+    var row = h.Db.RawEventsByDedupeHash.Values.Single();
+
+    return first == new IngestRawEventsResult(1, 0, 0)
+        && replay == new IngestRawEventsResult(0, 1, 0)
+        && row.MerchantId == merchantId
+        && row.DeviceId == paired.Device.Id
+        && row.SenderId == "bKash"
+        && row.Body.StartsWith("You have received", StringComparison.Ordinal);
+});
+
+await CheckAsync("raw event ingest rejects untrusted sender and impossible device clocks", async () =>
+{
+    var h = RawIngestHarness();
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var paired = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "payments-phone",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null));
+    var device = await h.Devices.AuthenticateAsync(paired.Device!.Id, paired.DeviceToken);
+
+    var result = await h.Ingest.IngestAsync(device!, [
+        new RawDeviceEvent(EventSource.Notification, "FakeBank", "You have received Tk 500.00", now),
+        new RawDeviceEvent(EventSource.Notification, "bKash", "", now),
+        new RawDeviceEvent(EventSource.Notification, "bKash", "too old", now.AddDays(-8)),
+        new RawDeviceEvent(EventSource.Notification, "bKash", "too new", now.AddMinutes(11)),
+    ]);
+
+    return result == new IngestRawEventsResult(0, 0, 4)
+        && h.Db.RawEventsByDedupeHash.IsEmpty;
+});
+
+await CheckAsync("raw event ingest requires the paired device credential", async () =>
+{
+    var h = RawIngestHarness();
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var paired = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "payments-phone",
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null));
+
+    var wrong = await h.Devices.AuthenticateAsync(paired.Device!.Id, "wrong");
+    var right = await h.Devices.AuthenticateAsync(paired.Device.Id, paired.DeviceToken);
+
+    return wrong is null && right is not null;
 });
 
 await CheckAsync("an order is accepted and starts ringing", async () =>
@@ -1299,6 +1581,451 @@ await CheckAsync("create invoice action creates invoice only once", async () =>
         && h.Db.Invoices.Count == 1
         && h.Db.Orders[r.Order.Id].ChargedAmount == r.Order.Amount
         && h.Db.Events.Count(e => e.Type == "action.create_invoice") == 1;
+});
+
+await CheckAsync("create invoice action reserves unique payable amounts in the open window", async () =>
+{
+    var h = ActionHarness();
+    var firstOrder = await h.Workflow.CreateAsync(Cmd(reference: "ORD-1", amount: 500m));
+    var secondOrder = await h.Workflow.CreateAsync(Cmd(reference: "ORD-2", amount: 500m));
+
+    await h.Actions.CreateInvoiceAsync(merchantId, firstOrder.Order!.Id);
+    await h.Actions.CreateInvoiceAsync(merchantId, secondOrder.Order!.Id);
+
+    var invoices = h.Db.Invoices.Values.OrderBy(i => i.OrderRef).ToList();
+
+    return invoices.Count == 2
+        && invoices[0].ChargedAmount == 500m
+        && invoices[1].ChargedAmount == 501m
+        && invoices.All(i => i.Mode == MatchingMode.UniqueAmount)
+        && h.Db.Orders[secondOrder.Order.Id].ChargedAmount == 501m;
+});
+
+await CheckAsync("expired invoice amount is available for a new invoice", async () =>
+{
+    var h = ActionHarness();
+    h.Db.Invoices[Guid.CreateVersion7()] = new Invoice
+    {
+        Id = Guid.CreateVersion7(),
+        TenantId = merchantId,
+        OrderRef = "OLD",
+        Amount = 500m,
+        ChargedAmount = 500m,
+        Status = InvoiceStatus.AwaitingPayment,
+        ExpiresAt = now.AddMinutes(-20),
+        GraceUntil = now.AddMinutes(-1),
+        CreatedAt = now.AddMinutes(-40),
+        UpdatedAt = now.AddMinutes(-40),
+    };
+
+    var created = await h.Workflow.CreateAsync(Cmd(reference: "ORD-NEW", amount: 500m));
+    await h.Actions.CreateInvoiceAsync(merchantId, created.Order!.Id);
+
+    var invoice = h.Db.Invoices.Values.Single(i => i.OrderRef == "ORD-NEW");
+
+    return invoice.ChargedAmount == 500m
+        && invoice.Mode == MatchingMode.UniqueAmount;
+});
+
+await CheckAsync("invoice falls back to transaction id mode when unique amount slots are full", async () =>
+{
+    var h = ActionHarness();
+
+    foreach (var salt in Enumerable.Range(0, 2))
+    {
+        h.Db.Invoices[Guid.CreateVersion7()] = new Invoice
+        {
+            Id = Guid.CreateVersion7(),
+            TenantId = merchantId,
+            OrderRef = $"TAKEN-{salt}",
+            Amount = 50m,
+            ChargedAmount = 50m + salt,
+            Status = InvoiceStatus.AwaitingPayment,
+            ExpiresAt = now.AddMinutes(10),
+            GraceUntil = now.AddMinutes(25),
+            CreatedAt = now,
+            UpdatedAt = now,
+            Mode = MatchingMode.UniqueAmount,
+        };
+    }
+
+    var created = await h.Workflow.CreateAsync(Cmd(reference: "ORD-FALLBACK", amount: 50m));
+    await h.Actions.CreateInvoiceAsync(merchantId, created.Order!.Id);
+
+    var invoice = h.Db.Invoices.Values.Single(i => i.OrderRef == "ORD-FALLBACK");
+
+    return invoice.ChargedAmount == 50m
+        && invoice.Mode == MatchingMode.TrxId
+        && h.Db.Orders[created.Order.Id].ChargedAmount == 50m;
+});
+
+await CheckAsync("payment pipeline matches a bKash credit to the unique amount invoice", async () =>
+{
+    var h = PaymentPipelineHarness();
+    var created = await h.Workflow.CreateAsync(Cmd(reference: "ORD-PAY", amount: 500m));
+    await h.Actions.CreateInvoiceAsync(merchantId, created.Order!.Id);
+    var device = new AppDevice
+    {
+        Id = Guid.CreateVersion7(),
+        MerchantId = merchantId,
+        DeviceTokenHash = "hash",
+        Fingerprint = "payments-phone",
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
+    await h.Ingest.IngestAsync(device, [
+        new RawDeviceEvent(
+            EventSource.Notification,
+            "bKash",
+            "You have received Tk 500.00 from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DI28000001 at 28/09/2026 16:00",
+            now),
+    ]);
+
+    var result = await h.Pipeline.RunOnceAsync();
+    var invoice = h.Db.Invoices.Values.Single(i => i.OrderRef == "ORD-PAY");
+    var order = h.Db.Orders[created.Order.Id];
+
+    return result.Processed == 1
+        && result.Settled == 1
+        && result.Items[0].Match == MatchOutcome.Matched
+        && result.Items[0].Strategy == MatchStrategy.UniqueAmount
+        && invoice.Status == InvoiceStatus.Paid
+        && invoice.PaidAt == now
+        && order.Status == OrderStatus.Paid
+        && order.PaidAmount == 500m
+        && order.TrxId == "DI28000001"
+        && h.Db.Events.Count(e => e.Type == "order.paid") == 1
+        && h.Db.Outbox.Count(e => e.EventType == "order.paid") == 1
+        && h.Db.PaymentMatches.Count == 1
+        && h.Db.RawEventsByDedupeHash.Values.Single().State == RawEventState.Parsed;
+});
+
+await CheckAsync("payment pipeline does not settle the same provider trx id twice", async () =>
+{
+    var h = PaymentPipelineHarness();
+    var first = await h.Workflow.CreateAsync(Cmd(reference: "ORD-A", amount: 500m));
+    var second = await h.Workflow.CreateAsync(Cmd(reference: "ORD-B", amount: 501m));
+    await h.Actions.CreateInvoiceAsync(merchantId, first.Order!.Id);
+    await h.Actions.CreateInvoiceAsync(merchantId, second.Order!.Id);
+    var device = new AppDevice
+    {
+        Id = Guid.CreateVersion7(),
+        MerchantId = merchantId,
+        DeviceTokenHash = "hash",
+        Fingerprint = "payments-phone",
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
+    await h.Ingest.IngestAsync(device, [
+        new RawDeviceEvent(
+            EventSource.Notification,
+            "bKash",
+            "You have received Tk 500.00 from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DI28000002 at 28/09/2026 16:00",
+            now),
+    ]);
+    await h.Pipeline.RunOnceAsync();
+
+    h.Db.RawEventsByDedupeHash[$"manual-{Guid.CreateVersion7():N}"] = new RawEvent
+    {
+        Id = Guid.CreateVersion7(),
+        TenantId = merchantId,
+        DeviceId = device.Id,
+        Source = EventSource.Sms,
+        SenderId = "bKash",
+        Body = "You have received Tk 501.00 from 01910126335. Fee Tk 0.00. Balance Tk 2,382.86. TrxID DI28000002 at 28/09/2026 16:00",
+        DeviceReceivedAt = now.AddSeconds(1),
+        ServerReceivedAt = now.AddSeconds(1),
+        DedupeHash = $"manual-{Guid.CreateVersion7():N}",
+        State = RawEventState.Received,
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
+    var replay = await h.Pipeline.RunOnceAsync();
+    var secondInvoice = h.Db.Invoices.Values.Single(i => i.OrderRef == "ORD-B");
+
+    return replay.Items.Single().Match == MatchOutcome.AlreadyProcessed
+        && secondInvoice.Status == InvoiceStatus.AwaitingPayment
+        && h.Db.PaymentMatches.Count == 1
+        && h.Db.Outbox.Count(e => e.EventType == "order.paid") == 1;
+});
+
+await CheckAsync("payment pipeline leaves unmatched payments for review", async () =>
+{
+    var h = PaymentPipelineHarness();
+    var created = await h.Workflow.CreateAsync(Cmd(reference: "ORD-PAY", amount: 500m));
+    await h.Actions.CreateInvoiceAsync(merchantId, created.Order!.Id);
+    var device = new AppDevice
+    {
+        Id = Guid.CreateVersion7(),
+        MerchantId = merchantId,
+        DeviceTokenHash = "hash",
+        Fingerprint = "payments-phone",
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
+    await h.Ingest.IngestAsync(device, [
+        new RawDeviceEvent(
+            EventSource.Notification,
+            "bKash",
+            "You have received Tk 700.00 from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DI28000003 at 28/09/2026 16:00",
+            now),
+    ]);
+
+    var result = await h.Pipeline.RunOnceAsync();
+    var invoice = h.Db.Invoices.Values.Single(i => i.OrderRef == "ORD-PAY");
+
+    return result.NeedsAttention == 1
+        && result.Items.Single().Match == MatchOutcome.Unmatched
+        && invoice.Status == InvoiceStatus.AwaitingPayment
+        && h.Db.PaymentMatches.IsEmpty;
+});
+
+await CheckAsync("unmatched payment appears in payment review", async () =>
+{
+    var h = PaymentPipelineHarness();
+    var created = await h.Workflow.CreateAsync(Cmd(reference: "ORD-PAY", amount: 500m));
+    await h.Actions.CreateInvoiceAsync(merchantId, created.Order!.Id);
+    var device = new AppDevice
+    {
+        Id = Guid.CreateVersion7(),
+        MerchantId = merchantId,
+        DeviceTokenHash = "hash",
+        Fingerprint = "payments-phone",
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
+    await h.Ingest.IngestAsync(device, [
+        new RawDeviceEvent(
+            EventSource.Notification,
+            "bKash",
+            "You have received Tk 700.00 from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DI28000004 at 28/09/2026 16:00",
+            now),
+    ]);
+    await h.Pipeline.RunOnceAsync();
+
+    var review = await h.PaymentReviews.ListAsync(merchantId);
+
+    return review.Count == 1
+        && review[0].Reason == "No open invoice expects this amount."
+        && review[0].Body.Contains("DI28000004", StringComparison.Ordinal);
+});
+
+await CheckAsync("manual payment review match settles order and writes audit", async () =>
+{
+    var h = PaymentPipelineHarness();
+    var created = await h.Workflow.CreateAsync(Cmd(reference: "ORD-PAY", amount: 500m));
+    await h.Actions.CreateInvoiceAsync(merchantId, created.Order!.Id);
+    var device = new AppDevice
+    {
+        Id = Guid.CreateVersion7(),
+        MerchantId = merchantId,
+        DeviceTokenHash = "hash",
+        Fingerprint = "payments-phone",
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
+    await h.Ingest.IngestAsync(device, [
+        new RawDeviceEvent(
+            EventSource.Notification,
+            "bKash",
+            "You have received Tk 700.00 from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DI28000005 at 28/09/2026 16:00",
+            now),
+    ]);
+    await h.Pipeline.RunOnceAsync();
+    var rawEventId = h.Db.RawEventsByDedupeHash.Values.Single().Id;
+
+    var matched = await h.PaymentReviews.ManualMatchAsync(new ManualPaymentMatchCommand(
+        merchantId,
+        rawEventId,
+        "ORD-PAY",
+        "rafi",
+        "customer paid a different amount"));
+    var invoice = h.Db.Invoices.Values.Single(i => i.OrderRef == "ORD-PAY");
+    var order = h.Db.Orders[created.Order!.Id];
+
+    return matched.Outcome == ManualPaymentMatchOutcome.Matched
+        && invoice.Status == InvoiceStatus.Paid
+        && order.Status == OrderStatus.Paid
+        && order.PaidAmount == 700m
+        && order.TrxId == "DI28000005"
+        && h.Db.PaymentMatches.Values.Single().Strategy == MatchStrategy.Manual
+        && h.Db.Events.Any(e => e.Type == "payment.manual_match" && e.ActorName == "rafi")
+        && h.Db.Outbox.Count(e => e.EventType == "order.paid") == 1
+        && h.Db.RawEventsByDedupeHash.Values.Single().FailureReason is null;
+});
+
+await CheckAsync("manual payment review match refuses an already matched transaction", async () =>
+{
+    var h = PaymentPipelineHarness();
+    var first = await h.Workflow.CreateAsync(Cmd(reference: "ORD-A", amount: 500m));
+    var second = await h.Workflow.CreateAsync(Cmd(reference: "ORD-B", amount: 600m));
+    await h.Actions.CreateInvoiceAsync(merchantId, first.Order!.Id);
+    await h.Actions.CreateInvoiceAsync(merchantId, second.Order!.Id);
+    var device = new AppDevice
+    {
+        Id = Guid.CreateVersion7(),
+        MerchantId = merchantId,
+        DeviceTokenHash = "hash",
+        Fingerprint = "payments-phone",
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+
+    await h.Ingest.IngestAsync(device, [
+        new RawDeviceEvent(
+            EventSource.Notification,
+            "bKash",
+            "You have received Tk 500.00 from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DI28000006 at 28/09/2026 16:00",
+            now),
+    ]);
+    await h.Pipeline.RunOnceAsync();
+
+    h.Db.RawEventsByDedupeHash[$"manual-{Guid.CreateVersion7():N}"] = new RawEvent
+    {
+        Id = Guid.CreateVersion7(),
+        TenantId = merchantId,
+        DeviceId = device.Id,
+        Source = EventSource.Sms,
+        SenderId = "bKash",
+        Body = "You have received Tk 600.00 from 01910126335. Fee Tk 0.00. Balance Tk 2,481.86. TrxID DI28000006 at 28/09/2026 16:00",
+        DeviceReceivedAt = now.AddSeconds(1),
+        ServerReceivedAt = now.AddSeconds(1),
+        DedupeHash = $"manual-{Guid.CreateVersion7():N}",
+        State = RawEventState.Parsed,
+        FailureReason = "No open invoice expects this amount.",
+        CreatedAt = now,
+        UpdatedAt = now,
+    };
+    var rawEventId = h.Db.RawEventsByDedupeHash.Values.Single(e => e.FailureReason is not null).Id;
+
+    var refused = await h.PaymentReviews.ManualMatchAsync(new ManualPaymentMatchCommand(
+        merchantId,
+        rawEventId,
+        "ORD-B",
+        "rafi",
+        null));
+
+    return refused.Outcome == ManualPaymentMatchOutcome.AlreadyMatched
+        && h.Db.PaymentMatches.Count == 1
+        && h.Db.Invoices.Values.Single(i => i.OrderRef == "ORD-B").Status == InvoiceStatus.AwaitingPayment;
+});
+
+await CheckAsync("payment e2e simulator pays an order from a paired device event", async () =>
+{
+    var h = PaymentE2eHarness();
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var paired = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "sim-phone-1",
+        "Counter phone",
+        "Galaxy A",
+        "1.0.0",
+        null,
+        DevicePermissionState.Healthy,
+        83,
+        "wifi"));
+    var device = await h.Devices.AuthenticateAsync(paired.Device!.Id, paired.DeviceToken);
+    var created = await h.Workflow.CreateAsync(Cmd(reference: "SIM-PAID", amount: 500m));
+    var action = await h.Actions.CreateInvoiceAsync(merchantId, created.Order!.Id);
+    var invoiceBefore = h.Db.Invoices.Values.Single(i => i.OrderRef == "SIM-PAID");
+    var body =
+        $"You have received Tk {invoiceBefore.ChargedAmount:0.00} from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DI28009901 at 28/09/2026 16:00";
+
+    var ingest = await h.Ingest.IngestAsync(device!, [
+        new RawDeviceEvent(EventSource.Notification, "bKash", body, now),
+        new RawDeviceEvent(EventSource.Notification, "bKash", body, now),
+    ]);
+    var matched = await h.Pipeline.RunOnceAsync();
+    var replay = await h.Pipeline.RunOnceAsync();
+    var paidInvoice = h.Db.Invoices.Values.Single(i => i.OrderRef == "SIM-PAID");
+    var paidOrder = h.Db.Orders[created.Order.Id];
+
+    h.Clock.Set(now.Add(DeviceOfflineAlertService.OfflineAfter).AddSeconds(1));
+    var offline = await h.OfflineAlerts.RunOnceAsync();
+    var recovered = await h.Devices.HeartbeatAsync(
+        paired.Device.Id,
+        paired.DeviceToken,
+        new DeviceHeartbeatCommand(DevicePermissionState.Healthy, 79, "4g", "1.0.1", null));
+
+    return paired.Outcome == PairDeviceOutcome.Paired
+        && device is not null
+        && action.Start == WorkflowActionStart.Started
+        && ingest.Accepted == 1
+        && ingest.Duplicates == 1
+        && matched.Processed == 1
+        && matched.Settled == 1
+        && replay.Processed == 0
+        && paidInvoice.Status == InvoiceStatus.Paid
+        && paidOrder.Status == OrderStatus.Paid
+        && paidOrder.PaidAmount == invoiceBefore.ChargedAmount
+        && paidOrder.TrxId == "DI28009901"
+        && h.Db.PaymentMatches.Count == 1
+        && h.Db.ParsedTransactions.Values.Single().RawEventId ==
+            h.Db.RawEventsByDedupeHash.Values.Single().Id
+        && h.Db.Outbox.Count(e => e.EventType == "order.paid") == 1
+        && offline.Alerted == 1
+        && h.Db.Outbox.Count(e => e.EventType == "device.offline") == 1
+        && recovered.Outcome == DeviceUpdateOutcome.Updated
+        && h.Db.AppDevices[paired.Device.Id].OfflineAlertedAt is null;
+});
+
+await CheckAsync("payment e2e simulator sends wrong amount to review and manual match", async () =>
+{
+    var h = PaymentE2eHarness();
+    var issued = await h.Devices.CreatePairingTokenAsync(merchantId);
+    var paired = await h.Devices.PairAsync(new PairDeviceCommand(
+        issued.Token,
+        "sim-phone-2",
+        null,
+        null,
+        "1.0.0",
+        null,
+        DevicePermissionState.Healthy,
+        90,
+        "wifi"));
+    var device = await h.Devices.AuthenticateAsync(paired.Device!.Id, paired.DeviceToken);
+    var created = await h.Workflow.CreateAsync(Cmd(reference: "SIM-REVIEW", amount: 500m));
+    await h.Actions.CreateInvoiceAsync(merchantId, created.Order!.Id);
+
+    var ingest = await h.Ingest.IngestAsync(device!, [
+        new RawDeviceEvent(
+            EventSource.Notification,
+            "bKash",
+            "You have received Tk 700.00 from 01910126335. Fee Tk 0.00. Balance Tk 1,881.86. TrxID DI28009902 at 28/09/2026 16:00",
+            now),
+    ]);
+    var pipeline = await h.Pipeline.RunOnceAsync();
+    var review = await h.PaymentReviews.ListAsync(merchantId);
+    var manual = await h.PaymentReviews.ManualMatchAsync(new ManualPaymentMatchCommand(
+        merchantId,
+        review.Single().RawEventId,
+        "SIM-REVIEW",
+        "sim-reviewer",
+        "customer paid a different amount"));
+    var invoice = h.Db.Invoices.Values.Single(i => i.OrderRef == "SIM-REVIEW");
+    var order = h.Db.Orders[created.Order.Id];
+
+    return ingest.Accepted == 1
+        && pipeline.NeedsAttention == 1
+        && pipeline.Items.Single().Match == MatchOutcome.Unmatched
+        && review.Count == 1
+        && review[0].Reason == "No open invoice expects this amount."
+        && manual.Outcome == ManualPaymentMatchOutcome.Matched
+        && invoice.Status == InvoiceStatus.Paid
+        && order.Status == OrderStatus.Paid
+        && order.PaidAmount == 700m
+        && order.TrxId == "DI28009902"
+        && h.Db.PaymentMatches.Values.Single().Strategy == MatchStrategy.Manual
+        && h.Db.Events.Any(e => e.Type == "payment.manual_match"
+            && e.ActorName == "sim-reviewer")
+        && h.Db.Outbox.Count(e => e.EventType == "order.paid") == 1
+        && h.Db.RawEventsByDedupeHash.Values.Single().FailureReason is null;
 });
 
 await CheckAsync("book courier action books courier only once", async () =>
@@ -2856,7 +3583,11 @@ return fail == 0 ? 0 : 1;
 
 sealed class FixedClock(DateTimeOffset at) : IClock
 {
-    public DateTimeOffset UtcNow { get; } = at;
+    private DateTimeOffset utcNow = at;
+
+    public DateTimeOffset UtcNow => utcNow;
+
+    public void Set(DateTimeOffset value) => utcNow = value;
 }
 
 sealed class PrefixProtector : ISecretProtector

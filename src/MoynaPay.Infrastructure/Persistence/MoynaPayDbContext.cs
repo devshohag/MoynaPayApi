@@ -49,6 +49,9 @@ public sealed class MoynaPayDbContext(
 
     public DbSet<Invoice> Invoices => Set<Invoice>();
     public DbSet<SipTrunk> SipTrunks => Set<SipTrunk>();
+    public DbSet<RawEvent> RawEvents => Set<RawEvent>();
+    public DbSet<ParsedTransaction> ParsedTransactions => Set<ParsedTransaction>();
+    public DbSet<PaymentMatch> PaymentMatches => Set<PaymentMatch>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -73,10 +76,7 @@ public sealed class MoynaPayDbContext(
         builder.Ignore<PaymentSession>();
         builder.Ignore<Device>();
         builder.Ignore<DevicePairingToken>();
-        builder.Ignore<ParsedTransaction>();
         builder.Ignore<PaymentClaim>();
-        builder.Ignore<PaymentMatch>();
-        builder.Ignore<RawEvent>();
         builder.Ignore<ParserTemplate>();
 
         builder.ApplyConfigurationsFromAssembly(typeof(MoynaPayDbContext).Assembly);

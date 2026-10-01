@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using MoynaPay.Application.AppAuth;
 using MoynaPay.Application.Abstractions;
+using MoynaPay.Application.Payments.Invoicing;
 using MoynaPay.Application.Voice;
 using MoynaPay.Domain.Merchants;
 using MoynaPay.Domain.Orders;
@@ -34,9 +35,13 @@ public sealed class MemoryDatabase
     public ConcurrentDictionary<string, AppDevicePairingToken> AppDevicePairingTokens { get; } =
         new(StringComparer.Ordinal);
     public ConcurrentDictionary<Guid, AppDevice> AppDevices { get; } = new();
+    public ConcurrentDictionary<string, RawEvent> RawEventsByDedupeHash { get; } =
+        new(StringComparer.Ordinal);
 
     public ConcurrentDictionary<Guid, Order> Orders { get; } = new();
     public ConcurrentDictionary<Guid, Invoice> Invoices { get; } = new();
+    public ConcurrentDictionary<Guid, ParsedTransaction> ParsedTransactions { get; } = new();
+    public ConcurrentDictionary<Guid, PaymentMatch> PaymentMatches { get; } = new();
     public ConcurrentDictionary<Guid, SipTrunk> SipTrunks { get; } = new();
     public List<OrderEvent> Events { get; } = [];
     public List<OutboxMessage> Outbox { get; } = [];
@@ -639,6 +644,81 @@ public sealed class MemoryInvoiceStore(MemoryDatabase db) : IInvoiceStore
         return Task.FromResult(invoice);
     }
 
+    public Task<IReadOnlyList<decimal>> ListOpenChargedAmountsAsync(Guid merchantId,
+        DateTimeOffset at, CancellationToken ct = default)
+    {
+        IReadOnlyList<decimal> amounts = db.Invoices.Values
+            .Where(i => i.TenantId == merchantId
+                && !i.IsDeleted
+                && i.Status is InvoiceStatus.Created or InvoiceStatus.AwaitingPayment
+                && i.GraceUntil >= at)
+            .Select(i => i.ChargedAmount)
+            .ToList();
+
+        return Task.FromResult(amounts);
+    }
+
+    public Task<IReadOnlyList<Invoice>> FindOpenByChargedAmountAsync(Guid merchantId,
+        decimal chargedAmount, DateTimeOffset occurredAt, CancellationToken ct = default)
+    {
+        IReadOnlyList<Invoice> rows = db.Invoices.Values
+            .Where(i => i.TenantId == merchantId
+                && !i.IsDeleted
+                && i.Status == InvoiceStatus.AwaitingPayment
+                && i.Mode == MatchingMode.UniqueAmount
+                && i.ChargedAmount == chargedAmount
+                && InvoiceWindow.Default.Accepts(i, occurredAt))
+            .ToList();
+
+        return Task.FromResult(rows);
+    }
+
+    public Task<bool> HasMatchedTransactionAsync(PaymentMethod method, string trxId,
+        CancellationToken ct = default)
+    {
+        var exists = db.ParsedTransactions.Values.Any(t =>
+            t.Method == method
+            && string.Equals(t.TrxId, trxId, StringComparison.OrdinalIgnoreCase)
+            && db.PaymentMatches.Values.Any(m => m.ParsedTransactionId == t.Id));
+
+        return Task.FromResult(exists);
+    }
+
+    public Task SaveMatchAsync(Invoice invoice, ParsedTransaction transaction, MatchStrategy strategy,
+        DateTimeOffset matchedAt, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(invoice);
+        ArgumentNullException.ThrowIfNull(transaction);
+
+        lock (db.Gate)
+        {
+            if (db.PaymentMatches.Values.Any(m => m.InvoiceId == invoice.Id)
+                || db.ParsedTransactions.Values.Any(t =>
+                    t.Method == transaction.Method
+                    && string.Equals(t.TrxId, transaction.TrxId, StringComparison.OrdinalIgnoreCase)))
+            {
+                return Task.CompletedTask;
+            }
+
+            db.Invoices[invoice.Id] = invoice;
+            db.ParsedTransactions[transaction.Id] = transaction;
+            var matchId = Guid.CreateVersion7();
+            db.PaymentMatches[matchId] = new PaymentMatch
+            {
+                Id = matchId,
+                TenantId = invoice.TenantId,
+                InvoiceId = invoice.Id,
+                ParsedTransactionId = transaction.Id,
+                Strategy = strategy,
+                MatchedAt = matchedAt,
+                CreatedAt = matchedAt,
+                UpdatedAt = matchedAt,
+            };
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task SaveAsync(Invoice invoice, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(invoice);
@@ -824,6 +904,94 @@ public sealed class MemoryAppDeviceStore(MemoryDatabase db) : IAppDeviceStore
         IReadOnlyList<AppDevice> rows = db.AppDevices.Values
             .Where(d => d.MerchantId == merchantId && d.IsActive)
             .OrderByDescending(d => d.LastHeartbeatAt ?? d.CreatedAt)
+            .ToList();
+
+        return Task.FromResult(rows);
+    }
+
+    public Task<IReadOnlyList<AppDevice>> ListOfflineCandidatesAsync(DateTimeOffset cutoff,
+        int take, CancellationToken ct = default)
+    {
+        IReadOnlyList<AppDevice> rows = db.AppDevices.Values
+            .Where(d => d.IsActive
+                && d.OfflineAlertedAt is null
+                && (d.LastHeartbeatAt ?? d.CreatedAt) <= cutoff)
+            .OrderBy(d => d.LastHeartbeatAt ?? d.CreatedAt)
+            .Take(Math.Clamp(take, 1, 500))
+            .ToList();
+
+        return Task.FromResult(rows);
+    }
+
+    public Task SaveOfflineAlertAsync(AppDevice device, OutboxMessage alert,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        ArgumentNullException.ThrowIfNull(alert);
+
+        lock (db.Gate)
+        {
+            db.AppDevices[device.Id] = device;
+            db.Outbox.Add(alert);
+        }
+
+        return Task.CompletedTask;
+    }
+}
+
+public sealed class MemoryRawEventStore(MemoryDatabase db) : IRawEventStore
+{
+    public Task<bool> AddIfNewAsync(RawEvent rawEvent, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(rawEvent);
+
+        return Task.FromResult(db.RawEventsByDedupeHash.TryAdd(rawEvent.DedupeHash, rawEvent));
+    }
+
+    public Task<RawEvent?> FindAsync(Guid merchantId, Guid rawEventId,
+        CancellationToken ct = default)
+    {
+        var row = db.RawEventsByDedupeHash.Values.FirstOrDefault(e =>
+            e.Id == rawEventId && e.TenantId == merchantId);
+
+        return Task.FromResult(row);
+    }
+
+    public Task<IReadOnlyList<RawEvent>> ClaimReceivedAsync(int take, CancellationToken ct = default)
+    {
+        lock (db.Gate)
+        {
+            IReadOnlyList<RawEvent> rows = db.RawEventsByDedupeHash.Values
+                .Where(e => e.State == RawEventState.Received)
+                .OrderBy(e => e.DeviceReceivedAt)
+                .Take(Math.Max(0, take))
+                .ToList();
+
+            foreach (var row in rows)
+            {
+                row.State = RawEventState.Claimed;
+                db.RawEventsByDedupeHash[row.DedupeHash] = row;
+            }
+
+            return Task.FromResult(rows);
+        }
+    }
+
+    public Task SaveAsync(RawEvent rawEvent, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(rawEvent);
+
+        db.RawEventsByDedupeHash[rawEvent.DedupeHash] = rawEvent;
+
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyList<RawEvent>> ListByMerchantAsync(Guid merchantId,
+        CancellationToken ct = default)
+    {
+        IReadOnlyList<RawEvent> rows = db.RawEventsByDedupeHash.Values
+            .Where(e => e.MerchantId == merchantId)
+            .OrderBy(e => e.DeviceReceivedAt)
             .ToList();
 
         return Task.FromResult(rows);

@@ -1,4 +1,6 @@
 using MoynaPay.Infrastructure;
+using MoynaPay.Application.Payments.Matching;
+using MoynaPay.Application.AppDevices;
 
 // Turns bKash notifications into paid orders.
 //
@@ -36,19 +38,43 @@ app.Run();
 /// Nothing is ever settled twice. The same notification arrives again whenever a phone
 /// comes back online with a queue, and the second one must do nothing at all.
 /// </summary>
-internal sealed class PaymentWorker(ILogger<PaymentWorker> log) : BackgroundService
+internal sealed class PaymentWorker(
+    IServiceScopeFactory scopes,
+    ILogger<PaymentWorker> log) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
-        log.LogInformation("Payment worker started. Matching arrives in phase 4.");
+        log.LogInformation("Payment worker started.");
 
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                // Phase 4: claim a batch of raw events, parse, match on wallet + exact
-                // amount inside the window, settle, and write why when nothing matched.
-                // A message that cannot be read goes to review, never to the bin.
+                using var scope = scopes.CreateScope();
+                var pipeline = scope.ServiceProvider.GetRequiredService<PaymentPipeline>();
+                var result = await pipeline.RunOnceAsync(ct: ct).ConfigureAwait(false);
+                var offlineAlerts = await scope.ServiceProvider
+                    .GetRequiredService<DeviceOfflineAlertService>()
+                    .RunOnceAsync(ct: ct)
+                    .ConfigureAwait(false);
+
+                if (result.Processed > 0)
+                {
+                    log.LogInformation(
+                        "Payment tick processed {Processed}; settled {Settled}; attention {Attention}",
+                        result.Processed,
+                        result.Settled,
+                        result.NeedsAttention);
+                }
+
+                if (offlineAlerts.Alerted > 0)
+                {
+                    log.LogWarning(
+                        "Device offline tick checked {Checked}; alerted {Alerted}; skipped {Skipped}",
+                        offlineAlerts.Checked,
+                        offlineAlerts.Alerted,
+                        offlineAlerts.Skipped);
+                }
             }
             catch (Exception ex)
             {
